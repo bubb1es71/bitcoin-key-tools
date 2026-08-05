@@ -1,9 +1,14 @@
+#![forbid(unsafe_code)]
+
 use std::io::{self, Read, Write};
+use zeroize::Zeroize;
 
 const MIN_DICE_ROLLS: usize = 100;
 const SYSTEM_ENTROPY_BYTES: usize = 256;
 
 fn main() {
+    let reproducible = std::env::args().any(|a| a == "-r");
+
     println!("seedroller - BIP39 seed generation from dice rolls + system entropy");
     println!();
     println!("Press keys 1-6 for each dice roll. Backspace to undo.");
@@ -13,20 +18,31 @@ fn main() {
     );
     println!();
 
-    let rolls = collect_dice_rolls();
+    let mut rolls = collect_dice_rolls();
     println!("\nCollected {} dice rolls.", rolls.len());
 
-    let system_entropy = read_system_entropy();
-    println!(
-        "Read {} bytes from system secure RNG.",
-        system_entropy.len()
-    );
+    let mut system_entropy = if reproducible {
+        println!("\x1b[1mWARNING: -r flag set, system entropy was NOT added.\x1b[0m");
+        println!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
+        Vec::new()
+    } else {
+        let entropy = read_system_entropy();
+        println!("Read {} bytes from system secure RNG.", entropy.len());
+        entropy.to_vec()
+    };
 
-    let entropy = combine_and_hash(&rolls, &system_entropy);
+    let mut entropy = combine_and_hash(&rolls, &system_entropy);
 
-    let mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("valid entropy length");
+    let mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("32-byte entropy is valid");
+
+    // Zeroize all sensitive intermediates
+    rolls.zeroize();
+    system_entropy.zeroize();
+    entropy.zeroize();
 
     println!("\nYour BIP39 seed phrase (24 words):\n");
+    println!("WARNING: This seed phrase will remain in your terminal scrollback.");
+    println!("Write it down, then clear your terminal (Cmd+K) when done.\n");
     for (i, word) in mnemonic.words().enumerate() {
         println!("  {:>2}. {}", i + 1, word);
     }
@@ -155,6 +171,8 @@ fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; 32] {
     data.extend_from_slice(system_entropy);
 
     let hash = sha256::Hash::hash(&data);
+    data.zeroize();
+
     let mut out = [0u8; 32];
     out.copy_from_slice(hash.as_ref());
     out
