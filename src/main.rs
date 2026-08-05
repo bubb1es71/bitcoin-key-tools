@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 #![forbid(unsafe_code)]
 
 use std::io::{self, Read, Write};
@@ -183,7 +185,8 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
             "Only {} of 6 dice values appeared — all 6 required.\n\
              With {} rolls every value should come up at least once.\n\
              Roll a real die and record each result honestly.",
-            distinct, rolls.len()
+            distinct,
+            rolls.len()
         ));
     }
 
