@@ -1,0 +1,22 @@
+name: Audit dependencies
+
+on:
+  # Nightly at 00:00 UTC
+  schedule:
+    - cron: "0 0 * * *"
+  # When PRs change dependencies
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit Cargo.lock against RustSec advisory database
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
