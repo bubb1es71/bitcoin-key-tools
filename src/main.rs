@@ -13,7 +13,7 @@ const MIN_DISTINCT_VALUES: usize = 6;
 fn main() {
     let reproducible = std::env::args().any(|a| a == "-r");
 
-    println!("seedroller - BIP39 seed generation from dice rolls + system entropy");
+    println!("seedroller - BIP39 seed generation from dice rolls + operating system RNG entropy");
     println!();
     println!("Press keys 1-6 for each dice roll. Backspace to undo.");
     println!(
@@ -31,12 +31,12 @@ fn main() {
     }
 
     let mut system_entropy = if reproducible {
-        println!("\x1b[1mWARNING: -r flag set, system entropy was NOT added.\x1b[0m");
+        println!("\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m");
         println!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
         Vec::new()
     } else {
         let entropy = read_system_entropy();
-        println!("Read {} bytes from system secure RNG.", entropy.len());
+        println!("Read {} bytes from operating system RNG.", entropy.len());
         entropy.to_vec()
     };
 
@@ -149,6 +149,22 @@ fn collect_dice_rolls() -> Vec<u8> {
             }
             b'\n' | b'\r' => {
                 if rolls.len() >= MIN_DICE_ROLLS {
+                    let distinct = distinct_values(&rolls);
+                    if distinct < MIN_DISTINCT_VALUES {
+                        println!(
+                            "only {}/{} values seen — keep rolling",
+                            distinct, MIN_DISTINCT_VALUES
+                        );
+                        continue;
+                    }
+                    let bits = shannon_entropy_bits(&rolls);
+                    if bits < MIN_ENTROPY_BITS {
+                        println!(
+                            "{:.1}/{} bits of entropy — keep rolling",
+                            bits, MIN_ENTROPY_BITS as u32
+                        );
+                        continue;
+                    }
                     break;
                 }
             }
@@ -161,6 +177,40 @@ fn collect_dice_rolls() -> Vec<u8> {
     rolls
 }
 
+/// Count occurrences of each dice value (1-6).
+fn count_values(rolls: &[u8]) -> [usize; 6] {
+    let mut counts = [0usize; 6];
+    for &r in rolls {
+        if (1..=6).contains(&r) {
+            counts[(r - 1) as usize] += 1;
+        }
+    }
+    counts
+}
+
+/// Number of distinct dice values (1-6) present in the rolls.
+fn distinct_values(rolls: &[u8]) -> usize {
+    count_values(rolls).iter().filter(|&&c| c > 0).count()
+}
+
+/// Shannon entropy of the roll distribution, in bits.
+fn shannon_entropy_bits(rolls: &[u8]) -> f64 {
+    if rolls.is_empty() {
+        return 0.0;
+    }
+    let counts = count_values(rolls);
+    let total = rolls.len() as f64;
+    let per_roll: f64 = counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / total;
+            -p * p.log2()
+        })
+        .sum();
+    per_roll * total
+}
+
 /// Validate that dice rolls contain sufficient entropy.
 /// Uses Shannon entropy to measure the actual information content
 /// of the roll distribution.
@@ -169,17 +219,14 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
         return Err("No dice rolls provided".to_string());
     }
 
-    // Count occurrences of each value (1-6)
-    let mut counts = [0usize; 6];
     for &r in rolls {
         if !(1..=6).contains(&r) {
             return Err(format!("Invalid dice value: {}", r));
         }
-        counts[(r - 1) as usize] += 1;
     }
 
     // Check distinct values
-    let distinct = counts.iter().filter(|&&c| c > 0).count();
+    let distinct = distinct_values(rolls);
     if distinct < MIN_DISTINCT_VALUES {
         return Err(format!(
             "Only {} of 6 dice values appeared — all 6 required.\n\
@@ -190,24 +237,14 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
         ));
     }
 
-    // Calculate Shannon entropy (bits)
-    let total = rolls.len() as f64;
-    let entropy_per_roll: f64 = counts
-        .iter()
-        .filter(|&&c| c > 0)
-        .map(|&c| {
-            let p = c as f64 / total;
-            -p * p.log2()
-        })
-        .sum();
-    let total_entropy = entropy_per_roll * total;
-
+    let total_entropy = shannon_entropy_bits(rolls);
     if total_entropy < MIN_ENTROPY_BITS {
         return Err(format!(
             "Insufficient dice entropy: {:.1} bits — minimum {} bits required.\n\
-             Distribution of 1-6: {:?}\n\
-             Add more rolls or use a fairly-balanced die.",
-            total_entropy, MIN_ENTROPY_BITS as u32, counts
+             Distribution of 1-6: {:?}",
+            total_entropy,
+            MIN_ENTROPY_BITS as u32,
+            count_values(rolls)
         ));
     }
 
@@ -221,7 +258,7 @@ fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
     let mut buf = [0u8; SYSTEM_ENTROPY_BYTES];
     OsRng
         .try_fill_bytes(&mut buf)
-        .expect("failed to read from system RNG");
+        .expect("failed to read from operating system RNG");
     buf
 }
 
@@ -396,6 +433,62 @@ mod tests {
         let a = bip39::Mnemonic::from_entropy(&combine_and_hash(&[1, 2, 3], &[])).unwrap();
         let b = bip39::Mnemonic::from_entropy(&combine_and_hash(&[4, 5, 6], &[])).unwrap();
         assert_ne!(a, b);
+    }
+
+    // -- entropy helpers --
+
+    #[test]
+    fn count_values_buckets_correctly() {
+        let rolls = vec![1, 1, 1, 2, 2, 3, 4, 5, 6, 6];
+        assert_eq!(count_values(&rolls), [3, 2, 1, 1, 1, 2]);
+    }
+
+    #[test]
+    fn count_values_ignores_invalid() {
+        let rolls = vec![0, 1, 7, 6];
+        assert_eq!(count_values(&rolls), [1, 0, 0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn distinct_values_counts() {
+        assert_eq!(distinct_values(&[1, 1, 1, 1]), 1);
+        assert_eq!(distinct_values(&[1, 2, 3, 4, 5, 6]), 6);
+        assert_eq!(distinct_values(&[1, 2, 3, 4, 5]), 5);
+        assert_eq!(distinct_values(&[]), 0);
+    }
+
+    #[test]
+    fn shannon_entropy_empty_is_zero() {
+        assert_eq!(shannon_entropy_bits(&[]), 0.0);
+    }
+
+    #[test]
+    fn shannon_entropy_single_value_is_zero() {
+        assert_eq!(shannon_entropy_bits(&[3; 100]), 0.0);
+    }
+
+    #[test]
+    fn shannon_entropy_uniform_100_rolls() {
+        // [17,17,17,17,16,16] -> ~258.4 bits
+        let rolls: Vec<u8> = (0..100).map(|i| (i % 6) as u8 + 1).collect();
+        let bits = shannon_entropy_bits(&rolls);
+        assert!(bits > 258.0 && bits < 258.5, "got {}", bits);
+    }
+
+    #[test]
+    fn shannon_entropy_max_is_n_log2_6() {
+        // Perfectly uniform 600 rolls: exactly 100 * log2(6) * 6... = 600 * log2(6)
+        let rolls: Vec<u8> = (0..600).map(|i| (i % 6) as u8 + 1).collect();
+        let bits = shannon_entropy_bits(&rolls);
+        let expected = 600.0 * 6f64.log2();
+        assert!((bits - expected).abs() < 0.001, "got {}", bits);
+    }
+
+    #[test]
+    fn shannon_entropy_increases_with_rolls() {
+        let base: Vec<u8> = (0..100).map(|i| (i % 6) as u8 + 1).collect();
+        let more: Vec<u8> = (0..200).map(|i| (i % 6) as u8 + 1).collect();
+        assert!(shannon_entropy_bits(&more) > shannon_entropy_bits(&base));
     }
 
     // -- check_entropy_strength (positive) --
