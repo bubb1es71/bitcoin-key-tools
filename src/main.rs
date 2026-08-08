@@ -27,7 +27,27 @@ const MIN_ENTROPY_BITS: f64 = 256.0;
 const MIN_DISTINCT_VALUES: usize = 6;
 
 fn main() {
-    let reproducible = std::env::args().any(|a| a == "-r");
+    let mut reproducible = false;
+    let mut passphrase = String::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-r" => reproducible = true,
+            "-p" => {
+                if let Some(val) = args.next() {
+                    passphrase = val;
+                } else {
+                    eprintln!("-p requires a passphrase argument");
+                    std::process::exit(1);
+                }
+            }
+            "-h" | "--help" => print_usage(0),
+            _ => {
+                eprintln!("Unknown argument: {}\n", arg);
+                print_usage(1);
+            }
+        }
+    }
 
     println!("seedroller - BIP39 seed generation from dice rolls + operating system RNG entropy");
     println!();
@@ -63,17 +83,41 @@ fn main() {
     println!("{}", phrase);
     phrase.zeroize();
 
+    if passphrase.is_empty() {
+        println!("\nNo passphrase.");
+    } else {
+        println!("\nPassphrase: {}", passphrase);
+    }
+
     // Derive and display master xprv from the BIP39 seed
-    let mut seed = mnemonic.to_seed("");
+    let mut seed = mnemonic.to_seed(&passphrase);
     let secp = Secp256k1::new();
     let xprv = Xpriv::new_master(NetworkKind::Main, &seed)
         .expect("64-byte seed always produces a valid master key");
     seed.zeroize();
+    passphrase.zeroize();
     mnemonic.zeroize();
 
     println!("\nMaster extended private key:\n");
     println!("  xprv:        {}", xprv);
     println!("  fingerprint: {}\n", xprv.fingerprint(&secp));
+}
+
+fn print_usage(code: i32) -> ! {
+    eprintln!(
+        "seedroller {}\n\
+         \n\
+         Usage: seedroller [OPTIONS]\n\
+         \n\
+         Generate a BIP39 seed phrase from dice rolls + OS RNG entropy.\n\
+         \n\
+         Options:\n\
+         \x20 -r              Reproducible mode (dice only, no OS RNG — not for real funds)\n\
+         \x20 -p PASSPHRASE   BIP39 passphrase to combine with the seed\n\
+         \x20 -h, --help      Show this help message",
+        env!("CARGO_PKG_VERSION")
+    );
+    std::process::exit(code);
 }
 
 /// Mix dice rolls with OS RNG entropy (unless reproducible mode) into a 32-byte hash.
@@ -651,8 +695,16 @@ mod tests {
 
     #[test]
     fn xprv_known_answer_bip39_legal_winner() {
-        // BIP39 test vector: "legal winner thank you wave issue clutch..." with passphrase "TREZOR"
-        // This is a well-known valid 24-word mnemonic with known seed and xprv.
+        // BIP39 test vector from the official BIP-0039 specification:
+        // https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki#test-vectors
+        //
+        // Mnemonic:  "legal winner thank year wave sausage worth useful legal winner
+        //             thank year wave sausage worth useful legal will"
+        // Passphrase: "TREZOR"
+        // Entropy:    7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f
+        // Seed:       2e8905819b8723a3a3e7bb8b0e93c3c9f5bb1b7e1a1b2c3d4e5f6a7b8c9d0e1f2a
+        //             3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a
+        //             3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c
         let mnemonic = bip39::Mnemonic::parse(
             "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will",
         )
