@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 #![forbid(unsafe_code)]
+#![doc = include_str!("../README.md")]
 
 use bitcoin::NetworkKind;
 use bitcoin::bip32::Xpriv;
@@ -103,6 +104,7 @@ fn main() {
     println!("  fingerprint: {}\n", xprv.fingerprint(&secp));
 }
 
+/// Print usage information to stderr and exit with the given exit code.
 fn print_usage(code: i32) -> ! {
     eprintln!(
         "seedroller {}\n\
@@ -146,6 +148,8 @@ struct TermGuard {
 }
 
 impl TermGuard {
+    /// Save current terminal settings and switch to cbreak mode for
+    /// unbuffered keypress input. Original settings are restored on drop.
     fn new() -> Self {
         let saved = Self::run_stty(&["-g"]);
         if saved.is_some() {
@@ -154,6 +158,9 @@ impl TermGuard {
         Self { saved }
     }
 
+    /// Run `stty` with the given arguments on `/dev/tty`, returning trimmed
+    /// stdout on success. Returns `None` if the tty cannot be opened or the
+    /// command fails.
     fn run_stty(args: &[&str]) -> Option<String> {
         let tty = std::fs::OpenOptions::new()
             .read(true)
@@ -178,6 +185,12 @@ impl Drop for TermGuard {
     }
 }
 
+/// Interactively collect dice rolls from the user via raw keypress input.
+///
+/// Reads single bytes from stdin in cbreak mode. Keys 1–6 append a roll,
+/// Backspace/Delete removes the last roll, Enter finishes once the minimum
+/// roll count is met and entropy checks pass. Returns the collected rolls
+/// as a vector of values 1–6.
 fn collect_dice_rolls() -> Vec<u8> {
     let _guard = TermGuard::new();
     let stdin = io::stdin();
@@ -306,6 +319,11 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Fill a 32-byte buffer from the operating system's cryptographic RNG.
+///
+/// Uses `OsRng` which delegates to `getrandom` — the platform-native secure
+/// RNG (getrandom syscall on Linux, getentropy on macOS, BCryptGenRandom on
+/// Windows). Panics if the OS RNG is unavailable.
 fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
     let mut buf = [0u8; SYSTEM_ENTROPY_BYTES];
     OsRng
@@ -314,6 +332,11 @@ fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
     buf
 }
 
+/// Combine dice rolls with OS entropy into a 32-byte SHA-256 hash.
+///
+/// The input is `u64_le(rolls.len()) || rolls || system_entropy`, hashed with
+/// SHA-256. The length prefix ensures the boundary between rolls and system
+/// entropy is unambiguous. The intermediate buffer is zeroized before returning.
 fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; SYSTEM_ENTROPY_BYTES] {
     let mut data =
         Vec::with_capacity(std::mem::size_of::<u64>() + rolls.len() + system_entropy.len());
