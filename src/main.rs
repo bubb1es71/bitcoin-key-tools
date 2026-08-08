@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+use bitcoin::NetworkKind;
+use bitcoin::bip32::Xpriv;
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin_hashes::{Hash, sha256};
 use rand::TryRngCore;
 use rand::rngs::OsRng;
@@ -59,7 +62,18 @@ fn main() {
     let mut phrase = mnemonic.to_string();
     println!("{}", phrase);
     phrase.zeroize();
+
+    // Derive and display master xprv from the BIP39 seed
+    let mut seed = mnemonic.to_seed("");
+    let secp = Secp256k1::new();
+    let xprv = Xpriv::new_master(NetworkKind::Main, &seed)
+        .expect("64-byte seed always produces a valid master key");
+    seed.zeroize();
     mnemonic.zeroize();
+
+    println!("\nMaster extended private key:\n");
+    println!("  xprv:        {}", xprv);
+    println!("  fingerprint: {}\n", xprv.fingerprint(&secp));
 }
 
 /// Mix dice rolls with OS RNG entropy (unless reproducible mode) into a 32-byte hash.
@@ -578,6 +592,77 @@ mod tests {
         let rolls = vec![0, 1, 2, 3, 4, 5];
         let err = check_entropy_strength(&rolls).unwrap_err();
         assert!(err.contains("Invalid"));
+    }
+
+    // -- xprv derivation --
+
+    #[test]
+    fn xprv_deterministic_from_mnemonic() {
+        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
+        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let seed = mnemonic.to_seed("");
+        let a = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        let b = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn xprv_roundtrip_mnemonic_seed_xprv_mnemonic() {
+        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
+        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let phrase = mnemonic.to_string();
+
+        // Parse the phrase back, derive seed, get xprv
+        let parsed = bip39::Mnemonic::parse(&phrase).unwrap();
+        let seed_a = parsed.to_seed("");
+        let xprv_a = Xpriv::new_master(NetworkKind::Main, &seed_a).unwrap();
+
+        // Original mnemonic should produce the same xprv
+        let seed_b = mnemonic.to_seed("");
+        let xprv_b = Xpriv::new_master(NetworkKind::Main, &seed_b).unwrap();
+
+        assert_eq!(xprv_a, xprv_b);
+        assert_eq!(mnemonic, parsed);
+    }
+
+    #[test]
+    fn xprv_starts_with_xprv_prefix() {
+        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
+        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let seed = mnemonic.to_seed("");
+        let xprv = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        assert!(xprv.to_string().starts_with("xprv"));
+    }
+
+    #[test]
+    fn xprv_different_mnemonics_different_xprvs() {
+        let entropy_a = combine_and_hash(&[1, 2, 3], &[0xAA; SYSTEM_ENTROPY_BYTES]);
+        let entropy_b = combine_and_hash(&[4, 5, 6], &[0xBB; SYSTEM_ENTROPY_BYTES]);
+        let seed_a = bip39::Mnemonic::from_entropy(&entropy_a)
+            .unwrap()
+            .to_seed("");
+        let seed_b = bip39::Mnemonic::from_entropy(&entropy_b)
+            .unwrap()
+            .to_seed("");
+        let a = Xpriv::new_master(NetworkKind::Main, &seed_a).unwrap();
+        let b = Xpriv::new_master(NetworkKind::Main, &seed_b).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn xprv_known_answer_bip39_legal_winner() {
+        // BIP39 test vector: "legal winner thank you wave issue clutch..." with passphrase "TREZOR"
+        // This is a well-known valid 24-word mnemonic with known seed and xprv.
+        let mnemonic = bip39::Mnemonic::parse(
+            "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("TREZOR");
+        let xprv = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        assert_eq!(
+            xprv.to_string(),
+            "xprv9s21ZrQH143K3Lv9MZLj16np5GzLe7tDKQfVusBni7toqJGcnKRtHSxUwbKUyUWiwpK55g1DUSsw76TF1T93VT4gz4wt5RM23pkaQLnvBh7"
+        );
     }
 
     // -- Zeroization --
