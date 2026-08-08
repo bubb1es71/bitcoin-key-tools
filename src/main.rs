@@ -2,12 +2,25 @@
 
 #![forbid(unsafe_code)]
 
+use bitcoin_hashes::{Hash, sha256};
+use rand::TryRngCore;
+use rand::rngs::OsRng;
 use std::io::{self, Read, Write};
 use zeroize::Zeroize;
 
+/// Minimum dice rolls before the user may finish. 100 fair rolls yield ~258.5 bits
+/// of Shannon entropy, just above the 256-bit threshold.
 const MIN_DICE_ROLLS: usize = 100;
+
+/// Bytes read from the OS CSPRNG (via `getrandom` under the hood). 32 bytes = 256 bits.
 const SYSTEM_ENTROPY_BYTES: usize = 32;
+
+/// Minimum Shannon entropy required across all dice rolls, in bits.
+/// Set to 256 so the dice alone can produce a strong seed even without OS entropy.
 const MIN_ENTROPY_BITS: f64 = 256.0;
+
+/// All six die faces must appear. With 100 rolls, missing any face is ~10⁻⁸ by chance;
+/// a missing face strongly suggests fake or patterned input.
 const MIN_DISTINCT_VALUES: usize = 6;
 
 fn main() {
@@ -30,25 +43,10 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut system_entropy = if reproducible {
-        println!("\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m");
-        println!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
-        Vec::new()
-    } else {
-        let mut raw = read_system_entropy();
-        let v = raw.to_vec();
-        raw.zeroize();
-        println!("Read {} bytes from operating system RNG.", v.len());
-        v
-    };
-
-    let mut entropy = combine_and_hash(&rolls, &system_entropy);
+    let mut entropy = generate_entropy(&rolls, reproducible);
+    rolls.zeroize();
 
     let mut mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("32-byte entropy is valid");
-
-    // Zeroize all sensitive intermediates
-    rolls.zeroize();
-    system_entropy.zeroize();
     entropy.zeroize();
 
     println!("\nYour BIP39 seed phrase (24 words):\n");
@@ -64,6 +62,26 @@ fn main() {
     mnemonic.zeroize();
 }
 
+/// Mix dice rolls with OS RNG entropy (unless reproducible mode) into a 32-byte hash.
+/// Zeroizes all intermediates before returning.
+fn generate_entropy(rolls: &[u8], reproducible: bool) -> [u8; SYSTEM_ENTROPY_BYTES] {
+    let mut system_entropy = if reproducible {
+        println!("\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m");
+        println!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
+        Vec::new()
+    } else {
+        let mut raw = read_system_entropy();
+        let v = raw.to_vec();
+        raw.zeroize();
+        println!("Read {} bytes from operating system RNG.", v.len());
+        v
+    };
+
+    let entropy = combine_and_hash(rolls, &system_entropy);
+    system_entropy.zeroize();
+    entropy
+}
+
 /// Restores terminal settings on drop.
 struct TermGuard {
     saved: Option<String>,
@@ -71,49 +89,33 @@ struct TermGuard {
 
 impl TermGuard {
     fn new() -> Self {
-        let saved = Self::stty_save();
+        let saved = Self::run_stty(&["-g"]);
         if saved.is_some() {
-            Self::stty(&["cbreak"]);
+            Self::run_stty(&["cbreak"]);
         }
         Self { saved }
     }
 
-    fn open_tty() -> Option<std::fs::File> {
-        std::fs::OpenOptions::new()
+    fn run_stty(args: &[&str]) -> Option<String> {
+        let tty = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
-            .ok()
-    }
-
-    fn stty_save() -> Option<String> {
-        let tty = Self::open_tty()?;
+            .ok()?;
         let output = std::process::Command::new("stty")
-            .arg("-g")
+            .args(args)
             .stdin(std::process::Stdio::from(tty))
             .output()
             .ok()?;
         let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if s.is_empty() { None } else { Some(s) }
     }
-
-    fn stty(args: &[&str]) {
-        if let Some(tty) = Self::open_tty() {
-            std::process::Command::new("stty")
-                .args(args)
-                .stdin(std::process::Stdio::from(tty))
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .ok();
-        }
-    }
 }
 
 impl Drop for TermGuard {
     fn drop(&mut self) {
         if let Some(ref s) = self.saved {
-            Self::stty(&[s]);
+            Self::run_stty(&[s]);
         }
     }
 }
@@ -154,23 +156,13 @@ fn collect_dice_rolls() -> Vec<u8> {
             }
             b'\n' | b'\r' => {
                 if rolls.len() >= MIN_DICE_ROLLS {
-                    let distinct = distinct_values(&rolls);
-                    if distinct < MIN_DISTINCT_VALUES {
-                        println!(
-                            "only {}/{} values seen — keep rolling",
-                            distinct, MIN_DISTINCT_VALUES
-                        );
-                        continue;
+                    match check_entropy_strength(&rolls) {
+                        Ok(()) => break,
+                        Err(msg) => {
+                            println!("{}", msg);
+                            continue;
+                        }
                     }
-                    let bits = shannon_entropy_bits(&rolls);
-                    if bits < MIN_ENTROPY_BITS {
-                        println!(
-                            "{:.1}/{} bits of entropy — keep rolling",
-                            bits, MIN_ENTROPY_BITS as u32
-                        );
-                        continue;
-                    }
-                    break;
                 }
             }
             _ => {
@@ -245,10 +237,10 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
     let total_entropy = shannon_entropy_bits(rolls);
     if total_entropy < MIN_ENTROPY_BITS {
         return Err(format!(
-            "Insufficient dice entropy: {:.1} bits — minimum {} bits required.\n\
+            "Insufficient dice entropy: {:.1} bits — minimum {:.0} bits required.\n\
              Distribution of 1-6: {:?}",
             total_entropy,
-            MIN_ENTROPY_BITS as u32,
+            MIN_ENTROPY_BITS,
             count_values(rolls)
         ));
     }
@@ -257,9 +249,6 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
 }
 
 fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
-    use rand::TryRngCore;
-    use rand::rngs::OsRng;
-
     let mut buf = [0u8; SYSTEM_ENTROPY_BYTES];
     OsRng
         .try_fill_bytes(&mut buf)
@@ -267,10 +256,9 @@ fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
     buf
 }
 
-fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; 32] {
-    use bitcoin_hashes::{Hash, sha256};
-
-    let mut data = Vec::with_capacity(8 + rolls.len() + system_entropy.len());
+fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; SYSTEM_ENTROPY_BYTES] {
+    let mut data =
+        Vec::with_capacity(std::mem::size_of::<u64>() + rolls.len() + system_entropy.len());
     data.extend_from_slice(&(rolls.len() as u64).to_le_bytes());
     data.extend_from_slice(rolls);
     data.extend_from_slice(system_entropy);
@@ -278,7 +266,7 @@ fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; 32] {
     let hash = sha256::Hash::hash(&data);
     data.zeroize();
 
-    let mut out = [0u8; 32];
+    let mut out = [0u8; SYSTEM_ENTROPY_BYTES];
     out.copy_from_slice(hash.as_ref());
     out
 }
@@ -292,15 +280,15 @@ mod tests {
     #[test]
     fn hash_output_is_32_bytes() {
         let rolls = vec![1, 2, 3, 4, 5, 6];
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let result = combine_and_hash(&rolls, &sys);
-        assert_eq!(result.len(), 32);
+        assert_eq!(result.len(), SYSTEM_ENTROPY_BYTES);
     }
 
     #[test]
     fn hash_deterministic_same_inputs() {
         let rolls = vec![1, 2, 3, 4, 5, 6];
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let a = combine_and_hash(&rolls, &sys);
         let b = combine_and_hash(&rolls, &sys);
         assert_eq!(a, b);
@@ -308,7 +296,7 @@ mod tests {
 
     #[test]
     fn hash_different_rolls_different_output() {
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let a = combine_and_hash(&[1, 2, 3], &sys);
         let b = combine_and_hash(&[4, 5, 6], &sys);
         assert_ne!(a, b);
@@ -317,16 +305,16 @@ mod tests {
     #[test]
     fn hash_different_system_entropy_different_output() {
         let rolls = vec![1, 2, 3];
-        let a = combine_and_hash(&rolls, &[0xAA; 256]);
-        let b = combine_and_hash(&rolls, &[0xBB; 256]);
+        let a = combine_and_hash(&rolls, &[0xAA; SYSTEM_ENTROPY_BYTES]);
+        let b = combine_and_hash(&rolls, &[0xBB; SYSTEM_ENTROPY_BYTES]);
         assert_ne!(a, b);
     }
 
     #[test]
     fn hash_empty_rolls_valid() {
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let result = combine_and_hash(&[], &sys);
-        assert_eq!(result.len(), 32);
+        assert_eq!(result.len(), SYSTEM_ENTROPY_BYTES);
     }
 
     #[test]
@@ -334,7 +322,7 @@ mod tests {
         // This is the -r (reproducible) mode path
         let rolls = vec![1, 2, 3, 4, 5, 6];
         let result = combine_and_hash(&rolls, &[]);
-        assert_eq!(result.len(), 32);
+        assert_eq!(result.len(), SYSTEM_ENTROPY_BYTES);
     }
 
     #[test]
@@ -351,7 +339,7 @@ mod tests {
 
     #[test]
     fn hash_single_roll_difference_changes_output() {
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let a = combine_and_hash(&[1, 2, 3], &sys);
         let b = combine_and_hash(&[1, 2, 4], &sys);
         assert_ne!(a, b);
@@ -359,7 +347,7 @@ mod tests {
 
     #[test]
     fn hash_roll_order_matters() {
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let a = combine_and_hash(&[1, 2], &sys);
         let b = combine_and_hash(&[2, 1], &sys);
         assert_ne!(a, b);
@@ -368,7 +356,7 @@ mod tests {
     #[test]
     fn hash_rolls_only_differs_from_rolls_plus_entropy() {
         let rolls = vec![1, 2, 3, 4, 5, 6];
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let without_sys = combine_and_hash(&rolls, &[]);
         let with_sys = combine_and_hash(&rolls, &sys);
         assert_ne!(without_sys, with_sys);
@@ -400,7 +388,7 @@ mod tests {
     #[test]
     fn entropy_produces_valid_24_word_mnemonic() {
         let rolls = vec![1, 2, 3, 4, 5, 6];
-        let sys = [0xAB; 256];
+        let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let entropy = combine_and_hash(&rolls, &sys);
         let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
         assert_eq!(mnemonic.words().count(), 24);
@@ -409,7 +397,7 @@ mod tests {
     #[test]
     fn mnemonic_roundtrip_parse() {
         let rolls = vec![3, 1, 4, 1, 5, 6, 2, 6, 5, 3];
-        let sys = [0xCD; 256];
+        let sys = [0xCD; SYSTEM_ENTROPY_BYTES];
         let entropy = combine_and_hash(&rolls, &sys);
         let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
         let phrase = mnemonic.to_string();
@@ -603,7 +591,7 @@ mod tests {
 
     #[test]
     fn zeroize_clears_array() {
-        let mut data = [0xFF; 32];
+        let mut data = [0xFF; SYSTEM_ENTROPY_BYTES];
         data.zeroize();
         assert!(data.iter().all(|&b| b == 0));
     }
