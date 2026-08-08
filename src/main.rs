@@ -5,8 +5,8 @@
 
 use bitcoin::NetworkKind;
 use bitcoin::bip32::Xpriv;
+use bitcoin::hashes::{Hash, sha256};
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin_hashes::{Hash, sha256};
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::io::{self, Read, Write};

@@ -7,6 +7,5 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 bip39 = { version = "2.2.2", default-features = false, features = ["alloc", "zeroize"] }
 bitcoin = { version = "0.32", default-features = false }
-bitcoin_hashes = "0.14"
 rand = { version = "0.9", default-features = false, features = ["os_rng"] }
 zeroize = "1"
