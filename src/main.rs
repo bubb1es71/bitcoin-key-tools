@@ -35,14 +35,16 @@ fn main() {
         println!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
         Vec::new()
     } else {
-        let entropy = read_system_entropy();
-        println!("Read {} bytes from operating system RNG.", entropy.len());
-        entropy.to_vec()
+        let mut raw = read_system_entropy();
+        let v = raw.to_vec();
+        raw.zeroize();
+        println!("Read {} bytes from operating system RNG.", v.len());
+        v
     };
 
     let mut entropy = combine_and_hash(&rolls, &system_entropy);
 
-    let mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("32-byte entropy is valid");
+    let mut mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("32-byte entropy is valid");
 
     // Zeroize all sensitive intermediates
     rolls.zeroize();
@@ -56,7 +58,10 @@ fn main() {
         println!("  {:>2}. {}", i + 1, word);
     }
     println!();
-    println!("{}", mnemonic);
+    let mut phrase = mnemonic.to_string();
+    println!("{}", phrase);
+    phrase.zeroize();
+    mnemonic.zeroize();
 }
 
 /// Restores terminal settings on drop.
@@ -265,7 +270,8 @@ fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
 fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; 32] {
     use bitcoin_hashes::{Hash, sha256};
 
-    let mut data = Vec::with_capacity(rolls.len() + system_entropy.len());
+    let mut data = Vec::with_capacity(8 + rolls.len() + system_entropy.len());
+    data.extend_from_slice(&(rolls.len() as u64).to_le_bytes());
     data.extend_from_slice(rolls);
     data.extend_from_slice(system_entropy);
 
@@ -332,13 +338,13 @@ mod tests {
     }
 
     #[test]
-    fn hash_empty_both_matches_sha256_of_empty() {
-        // SHA-256("") is a well-known constant
+    fn hash_empty_both_matches_sha256_of_zero_length_prefix() {
+        // SHA-256(0x0000000000000000) — length prefix of zero rolls, no system entropy
         let result = combine_and_hash(&[], &[]);
         let expected = [
-            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
-            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
-            0x78, 0x52, 0xb8, 0x55,
+            0xaf, 0x55, 0x70, 0xf5, 0xa1, 0x81, 0x0b, 0x7a, 0xf7, 0x8c, 0xaf, 0x4b, 0xc7, 0x0a,
+            0x66, 0x0f, 0x0d, 0xf5, 0x1e, 0x42, 0xba, 0xf9, 0x1d, 0x4d, 0xe5, 0xb2, 0x32, 0x8d,
+            0xe0, 0xe8, 0x3d, 0xfc,
         ];
         assert_eq!(result, expected);
     }
