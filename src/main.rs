@@ -29,11 +29,13 @@ const MIN_DISTINCT_VALUES: usize = 6;
 
 fn main() {
     let mut reproducible = false;
+    let mut testnet = false;
     let mut passphrase = String::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-r" => reproducible = true,
+            "-t" => testnet = true,
             "-p" => {
                 if let Some(val) = args.next() {
                     passphrase = val;
@@ -90,17 +92,24 @@ fn main() {
         println!("\nPassphrase: {}", passphrase);
     }
 
-    // Derive and display master xprv from the BIP39 seed
+    // Derive and display the master extended private key from the BIP39 seed.
+    // Testnet mode (-t) produces a tprv, mainnet produces an xprv.
+    let network = if testnet {
+        NetworkKind::Test
+    } else {
+        NetworkKind::Main
+    };
     let mut seed = mnemonic.to_seed(&passphrase);
     let secp = Secp256k1::new();
-    let xprv = Xpriv::new_master(NetworkKind::Main, &seed)
-        .expect("64-byte seed always produces a valid master key");
+    let xprv =
+        Xpriv::new_master(network, &seed).expect("64-byte seed always produces a valid master key");
     seed.zeroize();
     passphrase.zeroize();
     mnemonic.zeroize();
 
+    let prefix = if testnet { "tprv" } else { "xprv" };
     println!("\nMaster extended private key:\n");
-    println!("  xprv:        {}", xprv);
+    println!("  {}:        {}", prefix, xprv);
     println!("  fingerprint: {}\n", xprv.fingerprint(&secp));
 }
 
@@ -115,6 +124,7 @@ fn print_usage(code: i32) -> ! {
          \n\
          Options:\n\
          \x20 -r              Reproducible mode (dice only, no OS RNG — not for real funds)\n\
+         \x20 -t              Testnet mode (derive a testnet tprv master key)\n\
          \x20 -p PASSPHRASE   BIP39 passphrase to combine with the seed\n\
          \x20 -h, --help      Show this help message",
         env!("CARGO_PKG_VERSION")
@@ -737,6 +747,48 @@ mod tests {
         assert_eq!(
             xprv.to_string(),
             "xprv9s21ZrQH143K3Lv9MZLj16np5GzLe7tDKQfVusBni7toqJGcnKRtHSxUwbKUyUWiwpK55g1DUSsw76TF1T93VT4gz4wt5RM23pkaQLnvBh7"
+        );
+    }
+
+    // -- Testnet mode (-t) --
+
+    #[test]
+    fn tprv_starts_with_tprv_prefix() {
+        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
+        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let seed = mnemonic.to_seed("");
+        let xprv = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
+        assert!(xprv.to_string().starts_with("tprv"));
+    }
+
+    #[test]
+    fn tprv_same_seed_same_key_material_as_mainnet() {
+        // Testnet and mainnet master keys share the same key material and
+        // chain code; only the serialized version bytes (and fingerprint
+        // context) differ.
+        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
+        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let seed = mnemonic.to_seed("");
+        let mainnet = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        let testnet = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
+        assert_eq!(mainnet.private_key, testnet.private_key);
+        assert_eq!(mainnet.chain_code, testnet.chain_code);
+        assert_ne!(mainnet.to_string(), testnet.to_string());
+    }
+
+    #[test]
+    fn tprv_known_answer_bip39_legal_winner() {
+        // Same BIP39 test vector as xprv_known_answer_bip39_legal_winner,
+        // serialized with testnet version bytes.
+        let mnemonic = bip39::Mnemonic::parse(
+            "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("TREZOR");
+        let xprv = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
+        assert_eq!(
+            xprv.to_string(),
+            "tprv8ZgxMBicQKsPeA9g28CEAkQoPQQYsdvDexacnHcFC6PHcu1hmgmdoCKvrmV8yqu3KFqr5mcydoTjZwzz8fUzJWLHWiABjn54xvVzr3oUVN7"
         );
     }
 
