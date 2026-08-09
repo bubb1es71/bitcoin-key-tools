@@ -1,3 +1,7 @@
+[![Test](https://github.com/bubb1es71/seedroller/actions/workflows/test.yml/badge.svg)](https://github.com/bubb1es71/seedroller/actions/workflows/test.yml)
+[![Audit](https://github.com/bubb1es71/seedroller/actions/workflows/audit.yml/badge.svg)](https://github.com/bubb1es71/seedroller/actions/workflows/audit.yml)
+
+
 # seedroller
 
 Generate a BIP39 mnemonic seed phrase from physical dice rolls, hardened with operating system RNG entropy.

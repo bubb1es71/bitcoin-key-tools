@@ -1,4 +1,4 @@
-name: Audit dependencies
+name: Audit
 
 on:
   # Nightly at 00:00 UTC
@@ -9,14 +9,17 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - "**/audit.yml"
+  workflow_dispatch:
 
 jobs:
   audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Audit Cargo.lock against RustSec advisory database
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions-rust-lang/audit@v1
