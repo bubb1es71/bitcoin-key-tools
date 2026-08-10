@@ -1,7 +1,3 @@
-[![Test](https://github.com/bubb1es71/seedroller/actions/workflows/test.yml/badge.svg)](https://github.com/bubb1es71/seedroller/actions/workflows/test.yml)
-[![Audit](https://github.com/bubb1es71/seedroller/actions/workflows/audit.yml/badge.svg)](https://github.com/bubb1es71/seedroller/actions/workflows/audit.yml)
-
-
 # keyderiver
 
 Derive BIP380 descriptor key expressions from a master extended private key. The master
