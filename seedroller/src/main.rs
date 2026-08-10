@@ -513,6 +513,43 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    // Test vector created by hashing integer values in `rolls_str` using openssl and
+    // entering the resulting entropy as a hex string with https://iancoleman.io/bip39/.
+    //
+    // echo -n '1234561234561234561234561234561234561234561234561234561234561234561234561234561234561234561234561234' \
+    // | python3 -c 'import sys; sys.stdout.buffer.write(bytes(map(int, sys.stdin.read().strip())))' \
+    // | openssl dgst -sha256 -binary | od -An -tx1 | tr -d ' \n'
+    // 0d91ab5ff9625768d705bb7af3b6d2597d7d8e45572a5dc038a7c86c71739a01
+    //
+    #[test]
+    fn known_answer_100_rolls_no_os_entropy() {
+        let rolls_str = "1234561234561234561234561234561234561234561234561234561234561234561234561234561234561234561234561234";
+        let rolls: Vec<u8> = rolls_str
+            .chars()
+            .map(|c| c.to_digit(10).unwrap() as u8)
+            .collect();
+
+        // Ensure the test input is valid
+        assert!(check_entropy_strength(&rolls).is_ok());
+
+        // Generate entropy in reproducible mode (no OS entropy)
+        let entropy = combine_and_hash(&rolls, &[]);
+
+        // Ensure intermediate entropy matches expected hex value:
+        // 0d91ab5ff9625768d705bb7af3b6d2597d7d8e45572a5dc038a7c86c71739a01
+        let expected = [
+            0x0d, 0x91, 0xab, 0x5f, 0xf9, 0x62, 0x57, 0x68, 0xd7, 0x05, 0xbb, 0x7a, 0xf3, 0xb6,
+            0xd2, 0x59, 0x7d, 0x7d, 0x8e, 0x45, 0x57, 0x2a, 0x5d, 0xc0, 0x38, 0xa7, 0xc8, 0x6c,
+            0x71, 0x73, 0x9a, 0x01,
+        ];
+        assert_eq!(entropy, expected);
+
+        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+
+        let expected_phrase = "assault minute subject version century refuse foster resist kit oval region real style shrimp best torch fruit achieve clarify move shove right gym decline";
+        assert_eq!(mnemonic.to_string(), expected_phrase);
+    }
+
     // -- entropy helpers --
 
     #[test]
