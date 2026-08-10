@@ -14,7 +14,7 @@ use zeroize::Zeroize;
 /// The derived key expressions use BIP389 multipath wildcard covering both the receive (0)
 /// and change (1) chains. The key expressions inherit the master key's network version
 /// bytes (xprv/xpub or tprv/tpub).
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// master key (xprv or tprv)
@@ -22,11 +22,11 @@ struct Args {
     master: Xpriv,
 
     /// purpose
-    #[arg(short, long, default_value_t = 84)]
+    #[arg(short, long, default_value_t = 84, value_parser = parse_hardened_index)]
     purpose: u32,
 
     /// account
-    #[arg(short, long, default_value_t = 0)]
+    #[arg(short, long, default_value_t = 0, value_parser = parse_hardened_index)]
     account: u32,
 }
 
@@ -36,15 +36,27 @@ fn parse_master_key(s: &str) -> Result<Xpriv, String> {
         .map_err(|e| format!("invalid extended private key: {e}"))
 }
 
+/// Parse a BIP32 hardened child index, rejecting values that do not fit in a
+/// hardened child number (must be less than 2^31).
+fn parse_hardened_index(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(idx) if ChildNumber::from_hardened_idx(idx).is_ok() => Ok(idx),
+        Ok(idx) => Err(format!(
+            "{idx} exceeds the maximum hardened child index (2^31 - 1)"
+        )),
+        Err(_) => Err(format!("invalid unsigned integer: {s}")),
+    }
+}
+
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     println!("Derived keys for:");
-    println!("master key: {}", args.master);
     println!("purpose: {}", args.purpose);
     println!("account: {}", args.account);
 
-    let (mut seckey, pubkey) = bip380_account_keys(args.master, args.purpose, args.account);
+    let (mut seckey, pubkey) = bip380_account_keys(&args.master, args.purpose, args.account);
+    args.master.private_key.non_secure_erase();
     println!("\nSecret account key: {}", seckey);
     println!("Public account key: {}", pubkey);
     seckey.zeroize();
@@ -58,7 +70,7 @@ fn main() {
 /// fingerprint is that of the master key, and `/<0;1>/*` is the BIP389 multipath
 /// wildcard covering both the receive (0) and change (1) chains. The account keys
 /// inherit the master's network version bytes (xprv/xpub or tprv/tpub).
-fn bip380_account_keys(master: Xpriv, purpose: u32, account: u32) -> (String, String) {
+fn bip380_account_keys(master: &Xpriv, purpose: u32, account: u32) -> (String, String) {
     let secp = Secp256k1::new();
     let coin_type = if master.network.is_mainnet() { 0 } else { 1 };
     let path = DerivationPath::from(vec![
@@ -103,7 +115,7 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(master, 84, 0);
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0);
         assert_eq!(
             xprv_expr,
             "[73c5da0a/84'/0'/0']xprv9ybY78BftS5UGANki6oSifuQEjkpyAC8ZmBvBNTshQnCBcxnefjHS7buPMkkqhcRzmoGZ5bokx7GuyDAiktd5HemohAU4wV1ZPMDRmLpBMm/<0;1>/*"
@@ -125,7 +137,7 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(master, 84, 0);
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0);
         assert!(xprv_expr.contains("/84'/1'/0']tprv"));
         assert!(xpub_expr.contains("/84'/1'/0']tpub"));
     }
@@ -139,10 +151,27 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(master, 84, 0);
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0);
         let secp = Secp256k1::new();
         let expected_origin = format!("[{}/84'/0'/0']", master.fingerprint(&secp));
         assert!(xprv_expr.starts_with(&expected_origin));
         assert!(xpub_expr.starts_with(&expected_origin));
+    }
+
+    // -- Hardened index parsing --
+
+    #[test]
+    fn hardened_index_accepts_values_below_2_to_the_31() {
+        assert_eq!(parse_hardened_index("0"), Ok(0));
+        assert_eq!(parse_hardened_index("84"), Ok(84));
+        assert_eq!(parse_hardened_index("2147483647"), Ok(2_147_483_647));
+    }
+
+    #[test]
+    fn hardened_index_rejects_out_of_range_and_malformed_input() {
+        assert!(parse_hardened_index("2147483648").is_err());
+        assert!(parse_hardened_index("4294967295").is_err());
+        assert!(parse_hardened_index("-1").is_err());
+        assert!(parse_hardened_index("abc").is_err());
     }
 }
