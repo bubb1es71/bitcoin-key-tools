@@ -4,23 +4,36 @@ Guidance for LLM agents working on this repository.
 
 ## Project overview
 
-`seedroller` is a single-binary Rust CLI that generates a BIP39 mnemonic seed
-phrase (24 words) from physical dice rolls, hardened with operating system RNG
-entropy, and derives the BIP32 master extended private key (xprv/tprv). This is
-**security-sensitive cryptographic software** — correctness and secrecy of key
-material are the top priorities.
+This repository is a Cargo workspace containing two security-sensitive
+cryptographic CLI tools for Bitcoin key management:
+
+- **`seedroller`** — generates a BIP39 mnemonic seed phrase (24 words) from
+  physical dice rolls, hardened with operating system RNG entropy, and derives
+  the BIP32 master extended private key (xprv/tprv). Also derives BIP380
+  descriptor account keys (BIP44/BIP84 path) at the end of each run.
+- **`keyderiver`** — takes an existing master xprv/tprv and derives BIP380
+  descriptor key expressions (`[origin/purpose'/coin'/account']<key>/<0;1>/*`)
+  at a configurable BIP44 purpose and account index.
+
+Correctness and secrecy of key material are the top priorities.
 
 ## Repository layout
 
 ```text
-src/main.rs           — the entire application, including tests (~800 lines)
-Cargo.toml            — package manifest; intentionally minimal dependencies
-.github/workflows/    — CI: cargo test on PRs, nightly cargo audit
-README.md             — user docs; also included as crate-level docs via #![doc = ...]
+Cargo.toml                — workspace manifest (members: seedroller, keyderiver)
+seedroller/
+  Cargo.toml              — seedroller package manifest
+  README.md               — user docs; included as crate-level docs via #![doc = ...]
+  src/main.rs             — entire application, including tests (~800 lines)
+keyderiver/
+  Cargo.toml              — keyderiver package manifest
+  README.md               — user docs; included as crate-level docs via #![doc = ...]
+  src/main.rs             — entire application, including tests (~150 lines)
+.github/workflows/        — CI: cargo test on PRs, nightly cargo audit
 ```
 
-There is deliberately only one source file. Do not split it into modules
-unless the change clearly demands it.
+Each crate deliberately has only one source file. Do not split either into
+modules unless the change clearly demands it.
 
 ## Build, test, and run
 
@@ -42,7 +55,8 @@ the behavior being tested).
 1. **`#![forbid(unsafe_code)]`** is set at the crate root. Never write
    `unsafe` code or remove this attribute.
 2. **Keep dependencies minimal.** Current deps: `bip39`, `bitcoin`, `rand`,
-   `zeroize` (see `Cargo.toml`). Do not add a new dependency without a strong
+   `zeroize` (seedroller); `bitcoin`, `clap`, `zeroize` (keyderiver) — see each
+   crate's `Cargo.toml`. Do not add a new dependency without a strong
    justification; prefer the standard library or existing crates.
 3. **Zeroize all sensitive material.** Any byte buffer, string, or struct
    holding dice rolls, entropy, seed bytes, passphrases, mnemonics, or keys
@@ -60,8 +74,9 @@ the behavior being tested).
 - Standard Rust style (`rustfmt` defaults); edition 2024.
 - Simple, direct code — this is a small audit-friendly tool, not a framework.
 - Exit codes: `0` for help/success, `1` for errors; errors go to stderr.
-- If you change user-facing behavior or flags, update `README.md` (it is the
-  crate documentation, so stale docs break the docs contract).
+- If you change user-facing behavior or flags, update the relevant crate's
+  `README.md` (it is the crate documentation, so stale docs break the docs
+  contract).
 
 ## Commit guidelines (mandatory for agents)
 
