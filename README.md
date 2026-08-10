@@ -49,6 +49,66 @@ cargo install --path seedroller    # install each tool separately
 cargo install --path keyderiver
 ```
 
+## Reproducible Linux (x86_64) releases
+
+This workspace supports **reproducible builds**: byte-for-byte identical
+`seedroller` and `keyderiver` binaries that anyone can rebuild and verify
+against a published checksum. Reproducibility is anchored by two pinned files
+committed to this repository:
+
+- [`Cross.toml`](Cross.toml) — pins the exact `cross` container image by
+  immutable digest, fixing the toolchain, linker, and libc.
+- [`rust-toolchain.toml`](rust-toolchain.toml) — pins the exact Rust compiler
+  version and target.
+
+The binaries are statically linked against musl, so they run on any x86_64
+Linux with no runtime dependencies.
+
+### Prerequisites
+
+- **A container runtime**: [Docker](https://www.docker.com) (installed *and
+  running*) or [Podman](https://podman.io). The build runs inside a pinned
+  Linux container, so this works from macOS, Linux, or Windows hosts.
+- **[`cross`](https://github.com/cross-rs/cross)**:
+  `cargo install cross --locked`
+- **[`just`](https://github.com/casey/just)** (optional but recommended):
+  `cargo install just --locked`. If you prefer not to use `just`, run the
+  equivalent command from the [justfile](justfile) directly.
+- **Rust**: [`rustup`](https://rustup.rs) automatically installs the pinned
+  toolchain and target from `rust-toolchain.toml` on first build.
+
+### Build and verify
+
+```sh
+just release-linux   # build both reproducible release binaries
+just checksums       # print their SHA-256 checksums
+```
+
+The binaries are written to:
+
+```
+target/x86_64-unknown-linux-musl/release/seedroller
+target/x86_64-unknown-linux-musl/release/keyderiver
+```
+
+To verify a release, run `just checksums` and compare the output against the
+published checksums — they should match exactly.
+
+On a Linux system you can compute the checksums of the binaries directly with
+`sha256sum` (part of coreutils, installed by default):
+
+```sh
+sha256sum target/x86_64-unknown-linux-musl/release/seedroller \
+          target/x86_64-unknown-linux-musl/release/keyderiver
+```
+
+To check a downloaded release against a published `SHA256SUMS`-style file
+containing the expected hashes, place the file alongside the binaries and run:
+
+```sh
+sha256sum --check SHA256SUMS
+```
+
 ## Security
 
 Both tools forbid `unsafe` code, keep dependencies minimal, and zeroize all

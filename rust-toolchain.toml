@@ -1,0 +1,7 @@
+# Pin the exact Rust toolchain so all builders compile with identical
+# rustc/LLVM codegen — a prerequisite for reproducible builds.
+# Bump `channel` deliberately (and re-verify the reproducible build) when
+# upgrading the compiler.
+[toolchain]
+channel = "1.97.1"
+targets = ["x86_64-unknown-linux-musl"]

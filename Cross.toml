@@ -1,0 +1,10 @@
+# Pin the cross-compilation container to an immutable image digest so that
+# every builder uses the exact same toolchain, linker, and libc. This is the
+# key to byte-for-byte reproducible builds across machines and over time.
+#
+# To update: `docker pull ghcr.io/cross-rs/x86_64-unknown-linux-musl:main`
+# then record the new digest from:
+#   docker inspect --format='{{index .RepoDigests 0}}' \
+#     ghcr.io/cross-rs/x86_64-unknown-linux-musl:main
+[target.x86_64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl@sha256:dfb72a59029f50787396e5fe1c3d26b57cab78e326f434578e8719f0e12a8ecd"

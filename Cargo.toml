@@ -6,3 +6,6 @@ members = ["seedroller","keyderiver"]
 description = "Tools to generate a bitcoin seed and derive keys from it."
 edition = "2024"
 license = "MIT OR Apache-2.0"
+
+[profile.release]
+strip = true
