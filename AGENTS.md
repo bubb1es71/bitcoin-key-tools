@@ -9,8 +9,9 @@ cryptographic CLI tools for Bitcoin key management:
 
 - **`seedroller`** — generates a BIP39 mnemonic seed phrase (24 words) from
   physical dice rolls, hardened with operating system RNG entropy, and derives
-  the BIP32 master extended private key (xprv/tprv). Also derives BIP380
-  descriptor account keys (BIP44/BIP84 path) at the end of each run.
+  the BIP32 master extended private key (xprv/tprv). Only the master key is
+  written to stdout (everything else goes to stderr), so it can be piped
+  straight into `keyderiver`.
 - **`keyderiver`** — takes an existing master xprv/tprv and derives BIP380
   descriptor key expressions (`[origin/purpose'/coin'/account']<key>/<0;1>/*`)
   at a configurable BIP44 purpose and account index.
@@ -54,7 +55,7 @@ the behavior being tested).
 
 1. **`#![forbid(unsafe_code)]`** is set at the crate root. Never write
    `unsafe` code or remove this attribute.
-2. **Keep dependencies minimal.** Current deps: `bip39`, `bitcoin`, `rand`,
+2. **Keep dependencies minimal.** Current deps: `bip39`, `clap`, `bitcoin`, `rand`,
    `zeroize` (seedroller); `bitcoin`, `clap`, `zeroize` (keyderiver) — see each
    crate's `Cargo.toml`. Do not add a new dependency without a strong
    justification; prefer the standard library or existing crates.

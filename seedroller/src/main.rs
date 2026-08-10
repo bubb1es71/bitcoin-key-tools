@@ -54,15 +54,15 @@ fn main() {
     } else {
         String::new()
     };
-    println!("Press keys 1-6 for each dice roll. Backspace to undo.");
-    println!(
+    eprintln!("Press keys 1-6 for each dice roll. Backspace to undo.");
+    eprintln!(
         "After {} rolls, press Enter to finish (or keep adding rolls).",
         MIN_DICE_ROLLS
     );
-    println!();
+    eprintln!();
 
     let mut rolls = collect_dice_rolls();
-    println!("\nCollected {} dice rolls.", rolls.len());
+    eprintln!("\nCollected {} dice rolls.", rolls.len());
 
     if let Err(msg) = check_entropy_strength(&rolls) {
         eprintln!("\n\x1b[1mERROR: {}\x1b[0m", msg);
@@ -75,21 +75,21 @@ fn main() {
     let mut mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("32-byte entropy is valid");
     entropy.zeroize();
 
-    println!("\nYour BIP39 seed phrase (24 words):\n");
-    println!("WARNING: This seed phrase will remain in your terminal scrollback.");
-    println!("Write it down, then clear your terminal (Cmd+K) when done.\n");
+    eprintln!("\nYour BIP39 seed phrase (24 words):\n");
+    eprintln!("WARNING: This seed phrase will remain in your terminal scrollback.");
+    eprintln!("Write it down, then clear your terminal (Cmd+K) when done.\n");
     for (i, word) in mnemonic.words().enumerate() {
-        println!("  {:>2}. {}", i + 1, word);
+        eprintln!("  {:>2}. {}", i + 1, word);
     }
-    println!();
+    eprintln!();
     let mut phrase = mnemonic.to_string();
-    println!("{}", phrase);
+    eprintln!("{}", phrase);
     phrase.zeroize();
 
     if passphrase.is_empty() {
-        println!("\nNo passphrase.");
+        eprintln!("\nNo passphrase.");
     } else {
-        println!("\nPassphrase: {}", passphrase);
+        eprintln!("\nPassphrase: {}", passphrase);
     }
 
     // Derive and display the master extended private key from the BIP39 seed.
@@ -101,30 +101,35 @@ fn main() {
     };
     let mut seed = mnemonic.to_seed(&passphrase);
     let secp = Secp256k1::new();
-    let xprv =
+    let mut xprv =
         Xpriv::new_master(network, &seed).expect("64-byte seed always produces a valid master key");
     seed.zeroize();
     passphrase.zeroize();
     mnemonic.zeroize();
 
     let prefix = if args.testnet { "tprv" } else { "xprv" };
-    println!("\nMaster extended private key:\n");
-    println!("  {}:        {}", prefix, xprv);
-    println!("  fingerprint: {}\n", xprv.fingerprint(&secp));
+    eprintln!("\nMaster extended private key:");
+    eprintln!("fingerprint: {}", xprv.fingerprint(&secp));
+    eprint!("{}: ", prefix);
+    // send the xprv to standard output so it can be piped to keyderiver
+    println!("{}", xprv);
+    xprv.private_key.non_secure_erase();
 }
 
 /// Mix dice rolls with OS RNG entropy (unless reproducible mode) into a 32-byte hash.
 /// Zeroizes all intermediates before returning.
 fn generate_entropy(rolls: &[u8], reproducible: bool) -> [u8; SYSTEM_ENTROPY_BYTES] {
     let mut system_entropy = if reproducible {
-        println!("\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m");
-        println!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
+        eprintln!(
+            "\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m"
+        );
+        eprintln!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
         Vec::new()
     } else {
         let mut raw = read_system_entropy();
         let v = raw.to_vec();
         raw.zeroize();
-        println!("Read {} bytes from operating system RNG.", v.len());
+        eprintln!("Read {} bytes from operating system RNG.", v.len());
         v
     };
 
@@ -194,13 +199,13 @@ impl Drop for TermGuard {
 fn read_passphrase() -> String {
     let mut input = String::new();
     let read_result = if io::stdin().is_terminal() {
-        print!("BIP39 passphrase: ");
+        eprint!("BIP39 passphrase: ");
         io::stdout().flush().expect("failed to flush stdout");
         let result = {
             let _guard = TermGuard::new_no_echo();
             io::stdin().read_line(&mut input)
         }; // terminal echo is restored when the guard drops
-        println!(); // the user's Enter was not echoed; move to the next line
+        eprintln!(); // the user's Enter was not echoed; move to the next line
         result
     } else {
         io::stdin().read_line(&mut input)
@@ -236,9 +241,9 @@ fn collect_dice_rolls() -> Vec<u8> {
         // Print prompt for the next roll
         let n = rolls.len() + 1;
         if n <= MIN_DICE_ROLLS {
-            print!("[{}/{}]: ", n, MIN_DICE_ROLLS);
+            eprint!("[{}/{}]: ", n, MIN_DICE_ROLLS);
         } else {
-            print!("[{}/{} enter to end]: ", n, MIN_DICE_ROLLS);
+            eprint!("[{}/{} enter to end]: ", n, MIN_DICE_ROLLS);
         }
         io::stdout().flush().unwrap();
 
@@ -250,13 +255,13 @@ fn collect_dice_rolls() -> Vec<u8> {
         match byte[0] {
             b'1'..=b'6' => {
                 rolls.push(byte[0] - b'0');
-                println!();
+                eprintln!();
             }
             0x7f | 0x08 => {
                 if rolls.pop().is_some() {
-                    println!("(removed, back to {})", rolls.len());
+                    eprintln!("(removed, back to {})", rolls.len());
                 } else {
-                    println!();
+                    eprintln!();
                 }
             }
             b'\n' | b'\r' => {
@@ -264,14 +269,14 @@ fn collect_dice_rolls() -> Vec<u8> {
                     match check_entropy_strength(&rolls) {
                         Ok(()) => break,
                         Err(msg) => {
-                            println!("{}", msg);
+                            eprintln!("{}", msg);
                             continue;
                         }
                     }
                 }
             }
             _ => {
-                println!(" (use keys 1-6)");
+                eprintln!(" (use keys 1-6)");
             }
         }
     }
