@@ -10,7 +10,7 @@ use bitcoin::secp256k1::Secp256k1;
 use clap::Parser;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use zeroize::Zeroize;
 
 /// Minimum dice rolls before the user may finish. 100 fair rolls yield ~258.5 bits
@@ -41,13 +41,19 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     testnet: bool,
 
-    /// BIP39 passphrase to combine with the seed when creating the master key
-    #[arg(short, long, default_value_t = String::from(""))]
-    passphrase: String,
+    /// Prompt for a BIP39 passphrase to combine with the seed when creating
+    /// the master key (entered via hidden input, never on the command line)
+    #[arg(short, long, default_value_t = false)]
+    passphrase: bool,
 }
 
 fn main() {
-    let mut args = Args::parse();
+    let args = Args::parse();
+    let mut passphrase = if args.passphrase {
+        read_passphrase()
+    } else {
+        String::new()
+    };
     println!("Press keys 1-6 for each dice roll. Backspace to undo.");
     println!(
         "After {} rolls, press Enter to finish (or keep adding rolls).",
@@ -80,10 +86,10 @@ fn main() {
     println!("{}", phrase);
     phrase.zeroize();
 
-    if args.passphrase.is_empty() {
+    if passphrase.is_empty() {
         println!("\nNo passphrase.");
     } else {
-        println!("\nPassphrase: {}", args.passphrase);
+        println!("\nPassphrase: {}", passphrase);
     }
 
     // Derive and display the master extended private key from the BIP39 seed.
@@ -93,12 +99,12 @@ fn main() {
     } else {
         NetworkKind::Main
     };
-    let mut seed = mnemonic.to_seed(&args.passphrase);
+    let mut seed = mnemonic.to_seed(&passphrase);
     let secp = Secp256k1::new();
     let xprv =
         Xpriv::new_master(network, &seed).expect("64-byte seed always produces a valid master key");
     seed.zeroize();
-    args.passphrase.zeroize();
+    passphrase.zeroize();
     mnemonic.zeroize();
 
     let prefix = if args.testnet { "tprv" } else { "xprv" };
@@ -143,6 +149,16 @@ impl TermGuard {
         Self { saved }
     }
 
+    /// Save current terminal settings and disable echo, so the passphrase is
+    /// not displayed as it is typed. Original settings are restored on drop.
+    fn new_no_echo() -> Self {
+        let saved = Self::run_stty(&["-g"]);
+        if saved.is_some() {
+            Self::run_stty(&["-echo"]);
+        }
+        Self { saved }
+    }
+
     /// Run `stty` with the given arguments on `/dev/tty`, returning trimmed
     /// stdout on success. Returns `None` if the tty cannot be opened or the
     /// command fails.
@@ -168,6 +184,39 @@ impl Drop for TermGuard {
             Self::run_stty(&[s]);
         }
     }
+}
+
+/// Read the BIP39 passphrase without exposing it: interactively via a hidden
+/// terminal prompt (echo disabled), or from the first line of standard input
+/// when it is piped. Only the trailing line ending is stripped — other
+/// whitespace can be part of the passphrase. Prints an error to stderr and
+/// exits with code 1 if reading fails or the input is empty.
+fn read_passphrase() -> String {
+    let mut input = String::new();
+    let read_result = if io::stdin().is_terminal() {
+        print!("BIP39 passphrase: ");
+        io::stdout().flush().expect("failed to flush stdout");
+        let result = {
+            let _guard = TermGuard::new_no_echo();
+            io::stdin().read_line(&mut input)
+        }; // terminal echo is restored when the guard drops
+        println!(); // the user's Enter was not echoed; move to the next line
+        result
+    } else {
+        io::stdin().read_line(&mut input)
+    };
+    if let Err(e) = read_result {
+        input.zeroize();
+        eprintln!("error: failed to read passphrase: {e}");
+        std::process::exit(1);
+    }
+    let passphrase = input.trim_end_matches(['\r', '\n']).to_string();
+    input.zeroize();
+    if passphrase.is_empty() {
+        eprintln!("error: empty passphrase; omit the -p flag to derive without one");
+        std::process::exit(1);
+    }
+    passphrase
 }
 
 /// Interactively collect dice rolls from the user via raw keypress input.

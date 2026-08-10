@@ -68,10 +68,10 @@ Press keys **1–6** as you roll your die — each keypress registers immediatel
 ### With BIP39 passphrase
 
 ```sh
-seedroller -p "my secret passphrase"
+seedroller -p
 ```
 
-Adds a BIP39 passphrase to the seed derivation. The same dice rolls with different passphrases produce completely different master keys. The passphrase is zeroized from memory after use.
+Adds a BIP39 passphrase to the seed derivation. You are prompted for the passphrase with terminal echo disabled, so it is not displayed as you type and never appears on the command line, keeping it out of shell history and process listings. (When standard input is piped, the passphrase is instead read from the first line of input.) The same dice rolls with different passphrases produce completely different master keys. The passphrase is zeroized from memory after use.
 
 ### Testnet mode
 
