@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["seedroller"]
+members = ["seedroller","keyderiver"]
 
 [workspace.package]
 description = "Tools to generate a bitcoin seed and derive keys from it."
