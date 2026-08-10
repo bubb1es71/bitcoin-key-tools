@@ -6,21 +6,20 @@
 use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
 use bitcoin::secp256k1::Secp256k1;
 use clap::Parser;
+use std::io::{self, IsTerminal, Write};
 use zeroize::Zeroize;
 
 /// Derive BIP380 descriptor key expressions from a master BIP32 extended key and BIP44
 /// derivation path
 ///
-/// The derived key expressions use BIP389 multipath wildcard covering both the receive (0)
-/// and change (1) chains. The key expressions inherit the master key's network version
-/// bytes (xprv/xpub or tprv/tpub).
+/// The master key (xprv or tprv) is read via a hidden terminal prompt, or from standard
+/// input when piped — never as a command-line argument, so it does not appear in shell
+/// history or process listings. The derived key expressions use BIP389 multipath wildcard
+/// covering both the receive (0) and change (1) chains. The key expressions inherit the
+/// master key's network version bytes (xprv/xpub or tprv/tpub).
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// master key (xprv or tprv)
-    #[arg(value_parser = parse_master_key)]
-    master: Xpriv,
-
     /// purpose
     #[arg(short, long, default_value_t = 84, value_parser = parse_hardened_index)]
     purpose: u32,
@@ -48,15 +47,97 @@ fn parse_hardened_index(s: &str) -> Result<u32, String> {
     }
 }
 
-fn main() {
-    let mut args = Args::parse();
+/// Disables terminal echo on creation and restores the original terminal
+/// settings on drop.
+struct EchoGuard {
+    saved: Option<String>,
+}
 
+impl EchoGuard {
+    /// Save current terminal settings and disable echo, so the master key is
+    /// not displayed as it is typed. Original settings are restored on drop.
+    fn new() -> Self {
+        let saved = Self::run_stty(&["-g"]);
+        if saved.is_some() {
+            Self::run_stty(&["-echo"]);
+        }
+        Self { saved }
+    }
+
+    /// Run `stty` with the given arguments on `/dev/tty`, returning trimmed
+    /// stdout on success. Returns `None` if the tty cannot be opened or the
+    /// command fails.
+    fn run_stty(args: &[&str]) -> Option<String> {
+        let tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()?;
+        let output = std::process::Command::new("stty")
+            .args(args)
+            .stdin(std::process::Stdio::from(tty))
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+}
+
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        if let Some(ref s) = self.saved {
+            Self::run_stty(&[s]);
+        }
+    }
+}
+
+/// Read the master extended private key (xprv or tprv) without exposing it:
+/// interactively via a hidden terminal prompt (echo disabled), or from the
+/// first line of standard input when it is piped. The input string is
+/// zeroized after parsing. Prints an error to stderr and exits with code 1
+/// if reading or parsing fails.
+fn read_master_key() -> Xpriv {
+    let mut input = String::new();
+    if io::stdin().is_terminal() {
+        print!("Master key (xprv or tprv): ");
+        io::stdout().flush().expect("failed to flush stdout");
+        let read_result = {
+            let _guard = EchoGuard::new();
+            io::stdin().read_line(&mut input)
+        }; // terminal echo is restored when the guard drops
+        println!(); // the user's Enter was not echoed; move to the next line
+        if let Err(e) = read_result {
+            input.zeroize();
+            eprintln!("error: failed to read master key: {e}");
+            std::process::exit(1);
+        }
+    } else if let Err(e) = io::stdin().read_line(&mut input) {
+        input.zeroize();
+        eprintln!("error: failed to read master key from stdin: {e}");
+        std::process::exit(1);
+    }
+    let parsed = parse_master_key(input.trim());
+    input.zeroize();
+    match parsed {
+        Ok(master) => master,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn main() {
+    let args = Args::parse();
+    let mut master = read_master_key();
+
+    println!("\nmaster key: {}", master);
     println!("Derived keys for:");
     println!("purpose: {}", args.purpose);
     println!("account: {}", args.account);
 
-    let (mut seckey, pubkey) = bip380_account_keys(&args.master, args.purpose, args.account);
-    args.master.private_key.non_secure_erase();
+    let (mut seckey, pubkey) = bip380_account_keys(&master, args.purpose, args.account);
+    master.private_key.non_secure_erase();
     println!("\nSecret account key: {}", seckey);
     println!("Public account key: {}", pubkey);
     seckey.zeroize();
@@ -173,5 +254,30 @@ mod tests {
         assert!(parse_hardened_index("4294967295").is_err());
         assert!(parse_hardened_index("-1").is_err());
         assert!(parse_hardened_index("abc").is_err());
+    }
+
+    // -- Master key parsing --
+
+    #[test]
+    fn parse_master_key_accepts_mainnet_xprv() {
+        // BIP39 "legal winner" test vector master key.
+        let key = parse_master_key(
+            "xprv9s21ZrQH143K3Lv9MZLj16np5GzLe7tDKQfVusBni7toqJGcnKRtHSxUwbKUyUWiwpK55g1DUSsw76TF1T93VT4gz4wt5RM23pkaQLnvBh7",
+        )
+        .unwrap();
+        assert!(key.network.is_mainnet());
+    }
+
+    #[test]
+    fn parse_master_key_rejects_xpub_and_malformed_input() {
+        // An extended public key is not usable as a master private key.
+        assert!(
+            parse_master_key(
+                "xpub6CWXS3XJKMTChnkP87ETxuT4hrZsfPCFFiELYffd9fMWBnkWUw44uL4dywAn8mksW7MkCNjXzeia1ZYdDRz5Jx3cmqg6AqJaZHqLdBZ81zV"
+            )
+            .is_err()
+        );
+        assert!(parse_master_key("notakey").is_err());
+        assert!(parse_master_key("").is_err());
     }
 }
