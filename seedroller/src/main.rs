@@ -7,6 +7,7 @@ use bitcoin::NetworkKind;
 use bitcoin::bip32::Xpriv;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::secp256k1::Secp256k1;
+use clap::Parser;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::io::{self, Read, Write};
@@ -27,33 +28,26 @@ const MIN_ENTROPY_BITS: f64 = 256.0;
 /// a missing face strongly suggests fake or patterned input.
 const MIN_DISTINCT_VALUES: usize = 6;
 
-fn main() {
-    let mut reproducible = false;
-    let mut testnet = false;
-    let mut passphrase = String::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-r" => reproducible = true,
-            "-t" => testnet = true,
-            "-p" => {
-                if let Some(val) = args.next() {
-                    passphrase = val;
-                } else {
-                    eprintln!("-p requires a passphrase argument");
-                    std::process::exit(1);
-                }
-            }
-            "-h" | "--help" => print_usage(0),
-            _ => {
-                eprintln!("Unknown argument: {}\n", arg);
-                print_usage(1);
-            }
-        }
-    }
+/// Create a BIP39 seed mnemonic and corresponding BIP32 master key from dice
+/// rolls and operating system RNG entropy
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Reproducible mode (dice only, no OS RNG — not for real funds)
+    #[arg(short, long, default_value_t = false)]
+    reproducible: bool,
 
-    println!("seedroller - BIP39 seed generation from dice rolls + operating system RNG entropy");
-    println!();
+    /// Testnet mode (derive a testnet tprv master key)
+    #[arg(short, long, default_value_t = false)]
+    testnet: bool,
+
+    /// BIP39 passphrase to combine with the seed when creating the master key
+    #[arg(short, long, default_value_t = String::from(""))]
+    passphrase: String,
+}
+
+fn main() {
+    let mut args = Args::parse();
     println!("Press keys 1-6 for each dice roll. Backspace to undo.");
     println!(
         "After {} rolls, press Enter to finish (or keep adding rolls).",
@@ -69,7 +63,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut entropy = generate_entropy(&rolls, reproducible);
+    let mut entropy = generate_entropy(&rolls, args.reproducible);
     rolls.zeroize();
 
     let mut mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("32-byte entropy is valid");
@@ -86,50 +80,31 @@ fn main() {
     println!("{}", phrase);
     phrase.zeroize();
 
-    if passphrase.is_empty() {
+    if args.passphrase.is_empty() {
         println!("\nNo passphrase.");
     } else {
-        println!("\nPassphrase: {}", passphrase);
+        println!("\nPassphrase: {}", args.passphrase);
     }
 
     // Derive and display the master extended private key from the BIP39 seed.
     // Testnet mode (-t) produces a tprv, mainnet produces an xprv.
-    let network = if testnet {
+    let network = if args.testnet {
         NetworkKind::Test
     } else {
         NetworkKind::Main
     };
-    let mut seed = mnemonic.to_seed(&passphrase);
+    let mut seed = mnemonic.to_seed(&args.passphrase);
     let secp = Secp256k1::new();
     let xprv =
         Xpriv::new_master(network, &seed).expect("64-byte seed always produces a valid master key");
     seed.zeroize();
-    passphrase.zeroize();
+    args.passphrase.zeroize();
     mnemonic.zeroize();
 
-    let prefix = if testnet { "tprv" } else { "xprv" };
+    let prefix = if args.testnet { "tprv" } else { "xprv" };
     println!("\nMaster extended private key:\n");
     println!("  {}:        {}", prefix, xprv);
     println!("  fingerprint: {}\n", xprv.fingerprint(&secp));
-}
-
-/// Print usage information to stderr and exit with the given exit code.
-fn print_usage(code: i32) -> ! {
-    eprintln!(
-        "seedroller {}\n\
-         \n\
-         Usage: seedroller [OPTIONS]\n\
-         \n\
-         Generate a BIP39 seed phrase from dice rolls + OS RNG entropy.\n\
-         \n\
-         Options:\n\
-         \x20 -r              Reproducible mode (dice only, no OS RNG — not for real funds)\n\
-         \x20 -t              Testnet mode (derive a testnet tprv master key)\n\
-         \x20 -p PASSPHRASE   BIP39 passphrase to combine with the seed\n\
-         \x20 -h, --help      Show this help message",
-        env!("CARGO_PKG_VERSION")
-    );
-    std::process::exit(code);
 }
 
 /// Mix dice rolls with OS RNG entropy (unless reproducible mode) into a 32-byte hash.

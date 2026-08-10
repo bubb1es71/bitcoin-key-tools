@@ -16,10 +16,11 @@ The seedroller tool combines the randomness of real-world dice rolls with your o
 4. **Hash** — The combined input is hashed with SHA-256, producing exactly 32 bytes (256 bits) of entropy.
 5. **Generate seed phrase** — The 32 bytes are encoded as a standard BIP39 24-word mnemonic with checksum.
 6. **Derive master key** — The mnemonic is converted to a 64-byte BIP39 seed (with optional passphrase), from which the BIP32 master extended private key (xprv, or tprv in testnet mode) and fingerprint are derived.
+7. **Derive BIP84 account keys** — The account-level extended keys at `m/84'/0'/0'` (or `m/84'/1'/0'` in testnet mode) are derived and displayed in BIP380 descriptor key format, e.g. `[<master fingerprint>/84'/0'/0']<account xpub>/<0;1>/*`, where `/<0;1>/*` is the BIP389 multipath wildcard covering both the receive (0) and change (1) chains.
 
 ```text
 dice rolls (~258 bits)  ──┐
-                          ├── SHA-256 ──> 256 bits ──> BIP39 (24 words) ──> BIP32 xprv/tprv
+                          ├── SHA-256 ──> 256 bits ──> BIP39 (24 words) ──> BIP32 xprv/tprv ──> BIP380 xprv/tprv descriptor keys
 OS RNG (256 bits)       ──┘
 ```
 
@@ -78,7 +79,7 @@ Adds a BIP39 passphrase to the seed derivation. The same dice rolls with differe
 seedroller -t
 ```
 
-Derives the master key with testnet version bytes, producing a **tprv** instead of an xprv. The seed phrase, key material, and fingerprint are identical to mainnet mode — only the extended key serialization differs. Useful for testing wallet setups without touching real funds. Can be combined with `-p`.
+Derives the master key with testnet version bytes, producing a **tprv** instead of an xprv. The seed phrase, key material, and fingerprint are identical to mainnet mode — only the extended key serialization differs. The BIP84 account keys are derived at `m/84'/1'/0'` and displayed as **tprv**/**tpub**. Useful for testing wallet setups without touching real funds. Can be combined with `-p`.
 
 ### Reproducible mode (testing only)
 
@@ -107,7 +108,7 @@ cargo test
 - **Write down your seed phrase on paper.** It is displayed on screen and remains in your terminal scrollback — clear it with `clear` when done.
 - All sensitive intermediate values (dice rolls, operating system RNG entropy, hash input, hash output, BIP39 seed bytes, passphrase, mnemonic) are zeroed from memory after use via [`zeroize`](https://crates.io/crates/zeroize).
 - The crate forbids `unsafe` code (`#![forbid(unsafe_code)]`).
-- Dependencies are minimal: `bip39`, `bitcoin`, `bitcoin_hashes`, `rand`, `zeroize`.
+- Dependencies are minimal: `bip39`, `bitcoin`, `clap`, `rand`, `zeroize`.
 
 ## License
 

@@ -1,11 +1,8 @@
-[package]
-name = "seedroller"
-version = "0.1.0"
+[workspace]
+resolver = "3"
+members = ["seedroller"]
+
+[workspace.package]
+description = "Tools to generate a bitcoin seed and derive keys from it."
 edition = "2024"
 license = "MIT OR Apache-2.0"
-
-[dependencies]
-bip39 = { version = "2.2.2", default-features = false, features = ["alloc", "zeroize"] }
-bitcoin = { version = "0.32", default-features = false }
-rand = { version = "0.9", default-features = false, features = ["os_rng"] }
-zeroize = "1"
