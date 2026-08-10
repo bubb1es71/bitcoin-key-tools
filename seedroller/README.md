@@ -8,7 +8,7 @@ The seedroller tool combines the randomness of real-world dice rolls with your o
 
 1. **Collect dice rolls** — You roll a physical 6-sided die and type each result (1–6). A minimum of 100 rolls is required.
 2. **Verify entropy** — The roll distribution is checked to ensure it contains enough measurable entropy (see below).
-3. **Mix entropy sources** — Your dice rolls are length-prefixed and concatenated with 32 bytes (256 bits) from the operating system RNG (`OsRng`).
+3. **Mix entropy sources** — Your dice rolls are concatenated with 32 bytes (256 bits) from the operating system RNG (`OsRng`).
 4. **Hash** — The combined input is hashed with SHA-256, producing exactly 32 bytes (256 bits) of entropy.
 5. **Generate seed phrase** — The 32 bytes are encoded as a standard BIP39 24-word mnemonic with checksum.
 6. **Derive master key** — The mnemonic is converted to a 64-byte BIP39 seed (with optional passphrase), from which the BIP32 master extended private key (xprv, or tprv in testnet mode) and fingerprint are derived.
@@ -24,14 +24,13 @@ Either entropy source alone provides at least 256 bits, so the seed remains secu
 
 ## Entropy verification
 
-Before generating the seed, your dice rolls are validated against two checks:
+Before generating the seed, the Shannon entropy of your dice rolls is validated:
 
 | Check | Requirement | Why |
 |---|---|---|
-| **Distinct values** | All 6 faces must appear | With 100 rolls of a fair die, missing a face is essentially impossible (~10⁻⁸ probability). A missing face suggests fake or biased input. |
 | **Shannon entropy** | ≥ 256 bits total | Calculated from the actual roll distribution, not just roll count. 100 uniform rolls give ~258.5 bits. Skewed distributions are rejected even if all 6 values appear. |
 
-When you press **Enter** after 100+ rolls, both checks run. If either fails, the program tells you the current state (e.g. `255.6/256 bits of entropy — keep rolling`) and lets you keep rolling until the requirements are met — a typical honest 100-roll session lands just under 256 bits, and ~10 extra rolls reliably pushes it over. The program only exits with an error if you end input early (EOF / Ctrl+D) with insufficient entropy.
+When you press **Enter** after 100+ rolls, the check runs. If it fails, the program tells you the current state (e.g. `Insufficient dice entropy: 255.6 bits — minimum 256 bits required.`) and lets you keep rolling until the requirement is met — a typical honest 100-roll session lands just under 256 bits, and ~10 extra rolls reliably pushes it over. The program only exits with an error if you end input early (EOF / Ctrl+D) with insufficient entropy.
 
 Examples:
 

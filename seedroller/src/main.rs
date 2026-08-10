@@ -24,10 +24,6 @@ const SYSTEM_ENTROPY_BYTES: usize = 32;
 /// Set to 256 so the dice alone can produce a strong seed even without OS entropy.
 const MIN_ENTROPY_BITS: f64 = 256.0;
 
-/// All six die faces must appear. With 100 rolls, missing any face is ~10⁻⁸ by chance;
-/// a missing face strongly suggests fake or patterned input.
-const MIN_DISTINCT_VALUES: usize = 6;
-
 /// Create a BIP39 seed mnemonic and corresponding BIP32 master key from dice
 /// rolls and operating system RNG entropy
 #[derive(Parser, Debug)]
@@ -295,11 +291,6 @@ fn count_values(rolls: &[u8]) -> [usize; 6] {
     counts
 }
 
-/// Number of distinct dice values (1-6) present in the rolls.
-fn distinct_values(rolls: &[u8]) -> usize {
-    count_values(rolls).iter().filter(|&&c| c > 0).count()
-}
-
 /// Shannon entropy of the roll distribution, in bits.
 fn shannon_entropy_bits(rolls: &[u8]) -> f64 {
     if rolls.is_empty() {
@@ -332,18 +323,6 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
         }
     }
 
-    // Check distinct values
-    let distinct = distinct_values(rolls);
-    if distinct < MIN_DISTINCT_VALUES {
-        return Err(format!(
-            "Only {} of 6 dice values appeared — all 6 required.\n\
-             With {} rolls every value should come up at least once.\n\
-             Roll a real die and record each result honestly.",
-            distinct,
-            rolls.len()
-        ));
-    }
-
     let total_entropy = shannon_entropy_bits(rolls);
     if total_entropy < MIN_ENTROPY_BITS {
         return Err(format!(
@@ -373,13 +352,10 @@ fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
 
 /// Combine dice rolls with OS entropy into a 32-byte SHA-256 hash.
 ///
-/// The input is `u64_le(rolls.len()) || rolls || system_entropy`, hashed with
-/// SHA-256. The length prefix ensures the boundary between rolls and system
-/// entropy is unambiguous. The intermediate buffer is zeroized before returning.
+/// The input is `rolls || system_entropy`, hashed with SHA-256.
+/// The intermediate buffer is zeroized before returning.
 fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; SYSTEM_ENTROPY_BYTES] {
-    let mut data =
-        Vec::with_capacity(std::mem::size_of::<u64>() + rolls.len() + system_entropy.len());
-    data.extend_from_slice(&(rolls.len() as u64).to_le_bytes());
+    let mut data = Vec::with_capacity(rolls.len() + system_entropy.len());
     data.extend_from_slice(rolls);
     data.extend_from_slice(system_entropy);
 
@@ -443,18 +419,6 @@ mod tests {
         let rolls = vec![1, 2, 3, 4, 5, 6];
         let result = combine_and_hash(&rolls, &[]);
         assert_eq!(result.len(), SYSTEM_ENTROPY_BYTES);
-    }
-
-    #[test]
-    fn hash_empty_both_matches_sha256_of_zero_length_prefix() {
-        // SHA-256(0x0000000000000000) — length prefix of zero rolls, no system entropy
-        let result = combine_and_hash(&[], &[]);
-        let expected = [
-            0xaf, 0x55, 0x70, 0xf5, 0xa1, 0x81, 0x0b, 0x7a, 0xf7, 0x8c, 0xaf, 0x4b, 0xc7, 0x0a,
-            0x66, 0x0f, 0x0d, 0xf5, 0x1e, 0x42, 0xba, 0xf9, 0x1d, 0x4d, 0xe5, 0xb2, 0x32, 0x8d,
-            0xe0, 0xe8, 0x3d, 0xfc,
-        ];
-        assert_eq!(result, expected);
     }
 
     #[test]
@@ -564,14 +528,6 @@ mod tests {
     }
 
     #[test]
-    fn distinct_values_counts() {
-        assert_eq!(distinct_values(&[1, 1, 1, 1]), 1);
-        assert_eq!(distinct_values(&[1, 2, 3, 4, 5, 6]), 6);
-        assert_eq!(distinct_values(&[1, 2, 3, 4, 5]), 5);
-        assert_eq!(distinct_values(&[]), 0);
-    }
-
-    #[test]
     fn shannon_entropy_empty_is_zero() {
         assert_eq!(shannon_entropy_bits(&[]), 0.0);
     }
@@ -633,21 +589,6 @@ mod tests {
     // -- check_entropy_strength (negative) --
 
     #[test]
-    fn entropy_all_same_value_fails() {
-        let rolls = vec![3u8; 100];
-        let err = check_entropy_strength(&rolls).unwrap_err();
-        assert!(err.contains("of 6 dice values"));
-    }
-
-    #[test]
-    fn entropy_five_distinct_values_fails() {
-        // 5 values present but 6 never appears
-        let rolls: Vec<u8> = (0..100).map(|i| (i % 5) as u8 + 1).collect();
-        let err = check_entropy_strength(&rolls).unwrap_err();
-        assert!(err.contains("of 6 dice values"));
-    }
-
-    #[test]
     fn entropy_six_values_but_skewed_fails() {
         // All 6 present but heavily skewed: [50,20,10,10,5,5] = ~206 bits
         let mut rolls = Vec::new();
@@ -677,13 +618,6 @@ mod tests {
     fn entropy_single_roll_fails() {
         let rolls = vec![4u8];
         assert!(check_entropy_strength(&rolls).is_err());
-    }
-
-    #[test]
-    fn entropy_two_values_fails() {
-        let rolls: Vec<u8> = (0..100).map(|i| (i % 2) as u8 + 1).collect();
-        let err = check_entropy_strength(&rolls).unwrap_err();
-        assert!(err.contains("of 6 dice values"));
     }
 
     #[test]

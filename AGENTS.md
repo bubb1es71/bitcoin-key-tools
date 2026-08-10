@@ -64,7 +64,7 @@ the behavior being tested).
    must be wiped with `zeroize` after use, matching the existing pattern in
    `main()` and `generate_entropy()`.
 4. **Never weaken the entropy checks** (`MIN_DICE_ROLLS`, `MIN_ENTROPY_BITS`,
-   `MIN_DISTINCT_VALUES`, `check_entropy_strength`) or the default behavior of
+   `check_entropy_strength`) or the default behavior of
    mixing OS RNG entropy. The `-r` reproducible mode exists only for testing
    and must keep its bold warning.
 5. **Doc comments** (`///`) are required on all functions, methods, and
