@@ -11,7 +11,6 @@ use clap::Parser;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::io::{self, IsTerminal, Read, Write};
-use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -49,27 +48,19 @@ struct Args {
     passphrase: bool,
 }
 
-fn main() -> ExitCode {
+fn main() -> Result<(), String> {
     let args = Args::parse();
 
     // Refuse to run on a platform with a broken RNG or clock, before any key
     // material is handled (mirrors Bitcoin Core's Random_SanityCheck()).
-    if let Err(msg) = check_rng_sanity() {
-        eprintln!("\x1b[1mERROR: {}\x1b[0m", msg);
-        return ExitCode::FAILURE;
-    }
+    check_rng_sanity()?;
 
     let passphrase = if args.passphrase {
-        match read_passphrase() {
-            Ok(passphrase) => passphrase,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
+        read_passphrase()?
     } else {
         Zeroizing::new(String::new())
     };
+
     eprintln!("Press keys 1-6 for each dice roll.");
     eprintln!(
         "After {} rolls, press Enter to finish (or keep adding rolls).",
@@ -77,18 +68,15 @@ fn main() -> ExitCode {
     );
     eprintln!();
 
-    let rolls = collect_dice_rolls();
+    let rolls = collect_dice_rolls()?;
     eprintln!("\nCollected {} dice rolls.", rolls.len());
 
-    if let Err(msg) = check_entropy_strength(&rolls[..]) {
-        eprintln!("\n\x1b[1mERROR: {}\x1b[0m", msg);
-        return ExitCode::FAILURE;
-    }
+    check_entropy_strength(&rolls[..])?;
 
-    let entropy = generate_entropy(&rolls[..], args.reproducible);
+    let entropy = generate_entropy(&rolls[..], args.reproducible)?;
 
     // Mnemonic implements ZeroizeOnDrop
-    let mnemonic = bip39::Mnemonic::from_entropy(&entropy[..]).expect("32-byte entropy is valid");
+    let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).map_err(|e| e.to_string())?;
 
     eprintln!("\nYour BIP39 seed phrase (24 words):\n");
     eprintln!("WARNING: This seed phrase will remain in your terminal scrollback.");
@@ -115,8 +103,7 @@ fn main() -> ExitCode {
     };
     let seed = Zeroizing::new(mnemonic.to_seed(&*passphrase));
     let secp = Secp256k1::new();
-    let mut xprv = Xpriv::new_master(network, &seed[..])
-        .expect("64-byte seed always produces a valid master key");
+    let mut xprv = Xpriv::new_master(network, &seed[..]).map_err(|e| e.to_string())?;
 
     let prefix = if args.testnet { "tprv" } else { "xprv" };
     eprintln!("\nMaster extended private key:");
@@ -128,12 +115,15 @@ fn main() -> ExitCode {
     xprv.private_key.non_secure_erase();
     <bitcoin::bip32::ChainCode as AsMut<[u8; SYSTEM_ENTROPY_BYTES]>>::as_mut(&mut xprv.chain_code)
         .zeroize();
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 /// Mix dice rolls with OS RNG entropy (unless reproducible mode) into a 32-byte hash.
 /// Zeroizes all intermediates before returning.
-fn generate_entropy(rolls: &[u8], reproducible: bool) -> Zeroizing<[u8; SYSTEM_ENTROPY_BYTES]> {
+fn generate_entropy(
+    rolls: &[u8],
+    reproducible: bool,
+) -> Result<Zeroizing<[u8; SYSTEM_ENTROPY_BYTES]>, String> {
     let system_entropy = if reproducible {
         eprintln!(
             "\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m"
@@ -141,12 +131,12 @@ fn generate_entropy(rolls: &[u8], reproducible: bool) -> Zeroizing<[u8; SYSTEM_E
         eprintln!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
         Zeroizing::new(Vec::new())
     } else {
-        let raw = read_system_entropy();
+        let raw = read_system_entropy()?;
         eprintln!("Read {} bytes from operating system RNG.", raw.len());
         raw
     };
 
-    combine_and_hash(rolls, &system_entropy)
+    Ok(combine_and_hash(rolls, &system_entropy))
 }
 
 /// Restores terminal settings on drop.
@@ -212,7 +202,10 @@ fn read_passphrase() -> Result<Zeroizing<String>, String> {
     let mut passphrase = Zeroizing::new(String::new());
     let read_result = if io::stdin().is_terminal() {
         eprint!("BIP39 passphrase: ");
-        io::stdout().flush().expect("failed to flush stdout");
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("failed to flush stdout: {e}"))?;
+
         let result = {
             let _guard = TermGuard::new_no_echo();
             io::stdin().read_line(&mut passphrase)
@@ -222,9 +215,7 @@ fn read_passphrase() -> Result<Zeroizing<String>, String> {
     } else {
         io::stdin().read_line(&mut passphrase)
     };
-    if let Err(e) = read_result {
-        return Err(format!("failed to read passphrase: {e}"));
-    }
+    read_result.map_err(|e| format!("failed to read passphrase: {e}"))?;
     // trim line ending in place
     while matches!(passphrase.chars().last(), Some('\r' | '\n')) {
         passphrase.pop();
@@ -239,8 +230,9 @@ fn read_passphrase() -> Result<Zeroizing<String>, String> {
 ///
 /// Reads single bytes from stdin in cbreak mode. Keys 1–6 append a roll,
 /// Enter finishes once the minimum roll count is met and entropy checks
-/// pass. Returns the collected rolls as a vector of values 1–6.
-fn collect_dice_rolls() -> Zeroizing<Vec<u8>> {
+/// pass. Returns the collected rolls as a vector of values 1–6, or an
+/// error if writing the prompt to stdout fails.
+fn collect_dice_rolls() -> Result<Zeroizing<Vec<u8>>, String> {
     let _guard = TermGuard::new();
     let stdin = io::stdin();
     let mut lock = stdin.lock();
@@ -255,7 +247,9 @@ fn collect_dice_rolls() -> Zeroizing<Vec<u8>> {
         } else {
             eprint!("[{}/{} enter to end]: ", n, MIN_DICE_ROLLS);
         }
-        io::stdout().flush().unwrap();
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("failed to flush stdout: {e}"))?;
 
         // Read one key
         if lock.read_exact(&mut byte).is_err() {
@@ -284,7 +278,7 @@ fn collect_dice_rolls() -> Zeroizing<Vec<u8>> {
         }
     }
 
-    rolls
+    Ok(rolls)
 }
 
 /// Count occurrences of each dice value (1-6).
@@ -333,7 +327,7 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
     let total_entropy = shannon_entropy_bits(rolls);
     if total_entropy < MIN_ENTROPY_BITS {
         return Err(format!(
-            "Insufficient dice entropy: {:.1} bits — minimum {:.0} bits required.\n\
+            "Insufficient dice entropy: {:.1} bits — minimum {:.0} bits required. \
              Distribution of 1-6: {:?}",
             total_entropy,
             MIN_ENTROPY_BITS,
@@ -348,13 +342,13 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
 ///
 /// Uses `OsRng` which delegates to `getrandom` — the platform-native secure
 /// RNG (getrandom syscall on Linux, getentropy on macOS, BCryptGenRandom on
-/// Windows). Panics if the OS RNG is unavailable.
-fn read_system_entropy() -> Zeroizing<Vec<u8>> {
+/// Windows). Returns an error if the OS RNG is unavailable.
+fn read_system_entropy() -> Result<Zeroizing<Vec<u8>>, String> {
     let mut buf = Zeroizing::new([0u8; SYSTEM_ENTROPY_BYTES]);
     OsRng
         .try_fill_bytes(&mut *buf)
-        .expect("failed to read from operating system RNG");
-    Zeroizing::new(buf.to_vec())
+        .map_err(|e| format!("failed to read from operating system RNG: {e}"))?;
+    Ok(Zeroizing::new(buf.to_vec()))
 }
 
 /// Runtime sanity check of the operating system RNG and monotonic clock,
@@ -374,7 +368,7 @@ fn read_system_entropy() -> Zeroizing<Vec<u8>> {
 fn check_rng_sanity() -> Result<(), String> {
     let mut nonzero_seen = [false; SYSTEM_ENTROPY_BYTES];
     for _ in 0..SANITY_CHECK_MAX_TRIES {
-        let draw = read_system_entropy();
+        let draw = read_system_entropy()?;
         for (i, &b) in draw.iter().enumerate() {
             nonzero_seen[i] |= b != 0;
         }
@@ -384,7 +378,7 @@ fn check_rng_sanity() -> Result<(), String> {
     }
     if !nonzero_seen.iter().all(|&b| b) {
         return Err(format!(
-            "OS RNG sanity check failed: some byte positions were zero in all {} draws.\n\
+            "OS RNG sanity check failed: some byte positions were zero in all {} draws. \
              Do not generate keys on this system.",
             SANITY_CHECK_MAX_TRIES
         ));
@@ -495,20 +489,20 @@ mod tests {
 
     #[test]
     fn system_entropy_returns_32_bytes() {
-        let entropy = read_system_entropy();
+        let entropy = read_system_entropy().unwrap();
         assert_eq!(entropy.len(), SYSTEM_ENTROPY_BYTES);
     }
 
     #[test]
     fn system_entropy_not_all_zeros() {
-        let entropy = read_system_entropy();
+        let entropy = read_system_entropy().unwrap();
         assert!(entropy.iter().any(|&b| b != 0));
     }
 
     #[test]
     fn system_entropy_different_each_call() {
-        let a = read_system_entropy();
-        let b = read_system_entropy();
+        let a = read_system_entropy().unwrap();
+        let b = read_system_entropy().unwrap();
         assert_ne!(a, b);
     }
 

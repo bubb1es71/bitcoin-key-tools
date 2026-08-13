@@ -7,7 +7,6 @@ use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
 use bitcoin::secp256k1::Secp256k1;
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
-use std::process::ExitCode;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Derive BIP380 descriptor key expressions from a master BIP32 extended key and BIP44
@@ -101,42 +100,41 @@ fn read_master_key() -> Result<Xpriv, String> {
     let mut input = Zeroizing::new(String::new());
     if io::stdin().is_terminal() {
         print!("Master key (xprv or tprv): ");
-        io::stdout().flush().expect("failed to flush stdout");
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("failed to flush stdout: {e}"))?;
         let read_result = {
             let _guard = EchoGuard::new();
             io::stdin().read_line(&mut input)
         }; // terminal echo is restored when the guard drops
         println!(); // the user's Enter was not echoed; move to the next line
-        if let Err(e) = read_result {
-            return Err(format!("failed to read master key: {e}"));
-        }
-    } else if let Err(e) = io::stdin().read_line(&mut input) {
-        return Err(format!("failed to read master key from stdin: {e}"));
+        read_result.map_err(|e| format!("failed to read master key: {e}"))?;
+    } else {
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("failed to read master key from stdin: {e}"))?;
     }
     parse_master_key(input.trim())
 }
 
-fn main() -> ExitCode {
+fn main() -> Result<(), String> {
     let args = Args::parse();
-    let mut master = match read_master_key() {
-        Ok(master) => master,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let mut master = read_master_key()?;
 
     println!("\nmaster key: {}", master);
     println!("Derived keys for:");
     println!("purpose: {}", args.purpose);
     println!("account: {}", args.account);
 
-    let (seckey, pubkey) = bip380_account_keys(&master, args.purpose, args.account);
+    let keys = bip380_account_keys(&master, args.purpose, args.account);
+    // The master key is no longer needed; always wipe it before propagating
+    // a possible derivation error, so no exit path leaves it in memory.
     master.private_key.non_secure_erase();
     <bitcoin::bip32::ChainCode as AsMut<[u8; 32]>>::as_mut(&mut master.chain_code).zeroize();
+    let (seckey, pubkey) = keys?;
     println!("\nSecret account key: {}", *seckey);
     println!("Public account key: {}", pubkey);
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 /// Derive the BIP44 account-level keys from a master xprv and return BIP380 descriptor
@@ -147,17 +145,27 @@ fn main() -> ExitCode {
 /// fingerprint is that of the master key, and `/<0;1>/*` is the BIP389 multipath
 /// wildcard covering both the receive (0) and change (1) chains. The account keys
 /// inherit the master's network version bytes (xprv/xpub or tprv/tpub).
-fn bip380_account_keys(master: &Xpriv, purpose: u32, account: u32) -> (Zeroizing<String>, String) {
+///
+/// Returns an error if an index does not fit in a hardened child number or if
+/// BIP32 derivation fails (a ~2^-127 probability event).
+fn bip380_account_keys(
+    master: &Xpriv,
+    purpose: u32,
+    account: u32,
+) -> Result<(Zeroizing<String>, String), String> {
     let secp = Secp256k1::new();
     let coin_type = if master.network.is_mainnet() { 0 } else { 1 };
     let path = DerivationPath::from(vec![
-        ChildNumber::from_hardened_idx(purpose).expect("must fit in a hardened child index"),
-        ChildNumber::from_hardened_idx(coin_type).expect("must fit in a hardened child index"),
-        ChildNumber::from_hardened_idx(account).expect("must fit in a hardened child index"),
+        ChildNumber::from_hardened_idx(purpose)
+            .map_err(|e| format!("invalid purpose index {purpose}: {e}"))?,
+        ChildNumber::from_hardened_idx(coin_type)
+            .map_err(|e| format!("invalid coin type index {coin_type}: {e}"))?,
+        ChildNumber::from_hardened_idx(account)
+            .map_err(|e| format!("invalid account index {account}: {e}"))?,
     ]);
     let mut account_xprv = master
         .derive_priv(&secp, &path)
-        .expect("BIP32 derivation failure has ~2^-127 probability");
+        .map_err(|e| format!("BIP32 derivation failed: {e}"))?;
     let account_xpub = Xpub::from_priv(&secp, &account_xprv);
     let origin = format!(
         "[{}/{}'/{}'/{}']",
@@ -171,7 +179,7 @@ fn bip380_account_keys(master: &Xpriv, purpose: u32, account: u32) -> (Zeroizing
     account_xprv.private_key.non_secure_erase();
     <bitcoin::bip32::ChainCode as AsMut<[u8; 32]>>::as_mut(&mut account_xprv.chain_code).zeroize();
     let xpub_expr = format!("{}{}/<0;1>/*", origin, account_xpub);
-    (xprv_expr, xpub_expr)
+    Ok((xprv_expr, xpub_expr))
 }
 
 #[cfg(test)]
@@ -194,7 +202,7 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0);
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0).unwrap();
         assert_eq!(
             &*xprv_expr,
             "[73c5da0a/84'/0'/0']xprv9ybY78BftS5UGANki6oSifuQEjkpyAC8ZmBvBNTshQnCBcxnefjHS7buPMkkqhcRzmoGZ5bokx7GuyDAiktd5HemohAU4wV1ZPMDRmLpBMm/<0;1>/*"
@@ -216,7 +224,7 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0);
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0).unwrap();
         assert!(xprv_expr.contains("/84'/1'/0']tprv"));
         assert!(xpub_expr.contains("/84'/1'/0']tpub"));
     }
@@ -230,7 +238,7 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0);
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0).unwrap();
         let secp = Secp256k1::new();
         let expected_origin = format!("[{}/84'/0'/0']", master.fingerprint(&secp));
         assert!(xprv_expr.starts_with(&expected_origin));

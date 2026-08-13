@@ -75,11 +75,23 @@ the behavior being tested).
 - Standard Rust style (`rustfmt` defaults); edition 2024.
 - Simple, direct code — this is a small audit-friendly tool, not a framework.
 - Exit codes: `0` for help/success, `1` for errors; errors go to stderr.
+- Error handling is `Result`-based everywhere (required style): `main`
+  returns `Result<(), String>` in both crates — the `Termination` impl
+  prints the error to stderr and exits with status 1 on `Err`. Fallible
+  helpers return `Result<_, String>` and errors are propagated with `?`:
+  plain `?` when the error is already a `String`,
+  `.map_err(|e| format!("context: {e}"))?` when converting from another
+  error type. Never use `if let Err(e) = ... { return Err(...) }` blocks,
+  and never call `unwrap`/`expect`/`panic!` outside of tests.
+- Keep error messages single-line: the `Termination` impl prints them via
+  `Debug` formatting (`Error: "{msg}"`), which escapes embedded newlines
+  and wraps the message in quotes.
 - Never call `std::process::exit` — it terminates the process without running
-  destructors, so `Zeroizing` values would not be wiped. Fallible helpers
-  return `Result` and `main` returns `std::process::ExitCode`
-  (`ExitCode::FAILURE` for errors), so secrets are dropped and wiped on
-  every exit path.
+  destructors, so `Zeroizing` values would not be wiped. Returning `Result`
+  from `main` drops and wipes secrets on every exit path. If a `?` could
+  early-return past a required secret cleanup (such as the `Xpriv` wipes),
+  bind the `Result` to a variable first, wipe, then apply `?` — see
+  keyderiver's `main`.
 - For seedroller, prefer `zeroize::Zeroizing` for the main owned secrets
   (`rolls`, `entropy`, `passphrase`, `phrase`, and `seed`) so they are wiped
   automatically on drop. Leave `bip39::Mnemonic` as-is because it already
