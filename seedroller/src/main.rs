@@ -3,16 +3,13 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
-use bitcoin::NetworkKind;
-use bitcoin::bip32::Xpriv;
 use bitcoin::hashes::{Hash, sha256};
-use bitcoin::secp256k1::Secp256k1;
 use clap::Parser;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Minimum dice rolls before the user may finish. 100 fair rolls yield ~258.5 bits
 /// of Shannon entropy, just above the 256-bit threshold.
@@ -29,23 +26,14 @@ const MIN_ENTROPY_BITS: f64 = 256.0;
 /// to observe a nonzero byte in every output position before giving up.
 const SANITY_CHECK_MAX_TRIES: usize = 1024;
 
-/// Create a BIP39 seed mnemonic and corresponding BIP32 master key from dice
-/// rolls and operating system RNG entropy
+/// Create a BIP39 seed mnemonic from dice rolls and operating system RNG
+/// entropy
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// Reproducible mode (dice only, no OS RNG — not for real funds)
     #[arg(short, long, default_value_t = false)]
     reproducible: bool,
-
-    /// Testnet mode (derive a testnet tprv master key)
-    #[arg(short, long, default_value_t = false)]
-    testnet: bool,
-
-    /// Prompt for a BIP39 passphrase to combine with the seed when creating
-    /// the master key (entered via hidden input, never on the command line)
-    #[arg(short, long, default_value_t = false)]
-    passphrase: bool,
 }
 
 fn main() -> Result<(), String> {
@@ -54,12 +42,6 @@ fn main() -> Result<(), String> {
     // Refuse to run on a platform with a broken RNG or clock, before any key
     // material is handled (mirrors Bitcoin Core's Random_SanityCheck()).
     check_rng_sanity()?;
-
-    let passphrase = if args.passphrase {
-        read_passphrase()?
-    } else {
-        Zeroizing::new(String::new())
-    };
 
     eprintln!("Press keys 1-6 for each dice roll.");
     eprintln!(
@@ -86,35 +68,8 @@ fn main() -> Result<(), String> {
     }
     eprintln!();
     let phrase = Zeroizing::new(mnemonic.to_string());
-    eprintln!("{}", *phrase);
-
-    if passphrase.is_empty() {
-        eprintln!("\nNo passphrase.");
-    } else {
-        eprintln!("\nPassphrase used to create the xprv.");
-    }
-
-    // Derive and display the master extended private key from the BIP39 seed.
-    // Testnet mode (-t) produces a tprv, mainnet produces an xprv.
-    let network = if args.testnet {
-        NetworkKind::Test
-    } else {
-        NetworkKind::Main
-    };
-    let seed = Zeroizing::new(mnemonic.to_seed(&*passphrase));
-    let secp = Secp256k1::new();
-    let mut xprv = Xpriv::new_master(network, &seed[..]).map_err(|e| e.to_string())?;
-
-    let prefix = if args.testnet { "tprv" } else { "xprv" };
-    eprintln!("\nMaster extended private key:");
-    eprintln!("fingerprint: {}", xprv.fingerprint(&secp));
-    eprint!("{}: ", prefix);
-    // send the xprv to standard output so it can be piped to keyderiver
-    println!("{}", xprv);
-    // Safe to wipe: the xprv has already been serialized to stdout.
-    xprv.private_key.non_secure_erase();
-    <bitcoin::bip32::ChainCode as AsMut<[u8; SYSTEM_ENTROPY_BYTES]>>::as_mut(&mut xprv.chain_code)
-        .zeroize();
+    // send the seed words to standard output so they can be piped to keyderiver
+    println!("{}", *phrase);
     Ok(())
 }
 
@@ -155,16 +110,6 @@ impl TermGuard {
         Self { saved }
     }
 
-    /// Save current terminal settings and disable echo, so the passphrase is
-    /// not displayed as it is typed. Original settings are restored on drop.
-    fn new_no_echo() -> Self {
-        let saved = Self::run_stty(&["-g"]);
-        if saved.is_some() {
-            Self::run_stty(&["-echo"]);
-        }
-        Self { saved }
-    }
-
     /// Run `stty` with the given arguments on `/dev/tty`, returning trimmed
     /// stdout on success. Returns `None` if the tty cannot be opened or the
     /// command fails.
@@ -190,40 +135,6 @@ impl Drop for TermGuard {
             Self::run_stty(&[s]);
         }
     }
-}
-
-/// Read the BIP39 passphrase without exposing it: interactively via a hidden
-/// terminal prompt (echo disabled), or from the first line of standard input
-/// when it is piped. Only the trailing line ending is stripped — other
-/// whitespace can be part of the passphrase. The buffer is zeroized on drop,
-/// including when an error is returned. Returns an error if reading fails
-/// or the input is empty.
-fn read_passphrase() -> Result<Zeroizing<String>, String> {
-    let mut passphrase = Zeroizing::new(String::new());
-    let read_result = if io::stdin().is_terminal() {
-        eprint!("BIP39 passphrase: ");
-        io::stdout()
-            .flush()
-            .map_err(|e| format!("failed to flush stdout: {e}"))?;
-
-        let result = {
-            let _guard = TermGuard::new_no_echo();
-            io::stdin().read_line(&mut passphrase)
-        }; // terminal echo is restored when the guard drops
-        eprintln!(); // the user's Enter was not echoed; move to the next line
-        result
-    } else {
-        io::stdin().read_line(&mut passphrase)
-    };
-    read_result.map_err(|e| format!("failed to read passphrase: {e}"))?;
-    // trim line ending in place
-    while matches!(passphrase.chars().last(), Some('\r' | '\n')) {
-        passphrase.pop();
-    }
-    if passphrase.is_empty() {
-        return Err("empty passphrase; omit the -p flag to derive without one".to_string());
-    }
-    Ok(passphrase)
 }
 
 /// Interactively collect dice rolls from the user via raw keypress input.
@@ -409,6 +320,7 @@ fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> Zeroizing<[u8; SYSTE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroize;
 
     // -- combine_and_hash --
 
@@ -717,127 +629,6 @@ mod tests {
         let rolls = vec![0, 1, 2, 3, 4, 5];
         let err = check_entropy_strength(&rolls).unwrap_err();
         assert!(err.contains("Invalid"));
-    }
-
-    // -- xprv derivation --
-
-    #[test]
-    fn xprv_deterministic_from_mnemonic() {
-        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
-        let seed = mnemonic.to_seed("");
-        let a = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let b = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn xprv_roundtrip_mnemonic_seed_xprv_mnemonic() {
-        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
-        let phrase = mnemonic.to_string();
-
-        // Parse the phrase back, derive seed, get xprv
-        let parsed = bip39::Mnemonic::parse(&phrase).unwrap();
-        let seed_a = parsed.to_seed("");
-        let xprv_a = Xpriv::new_master(NetworkKind::Main, &seed_a).unwrap();
-
-        // Original mnemonic should produce the same xprv
-        let seed_b = mnemonic.to_seed("");
-        let xprv_b = Xpriv::new_master(NetworkKind::Main, &seed_b).unwrap();
-
-        assert_eq!(xprv_a, xprv_b);
-        assert_eq!(mnemonic, parsed);
-    }
-
-    #[test]
-    fn xprv_starts_with_xprv_prefix() {
-        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
-        let seed = mnemonic.to_seed("");
-        let xprv = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        assert!(xprv.to_string().starts_with("xprv"));
-    }
-
-    #[test]
-    fn xprv_different_mnemonics_different_xprvs() {
-        let entropy_a = combine_and_hash(&[1, 2, 3], &[0xAA; SYSTEM_ENTROPY_BYTES]);
-        let entropy_b = combine_and_hash(&[4, 5, 6], &[0xBB; SYSTEM_ENTROPY_BYTES]);
-        let seed_a = bip39::Mnemonic::from_entropy(&*entropy_a)
-            .unwrap()
-            .to_seed("");
-        let seed_b = bip39::Mnemonic::from_entropy(&*entropy_b)
-            .unwrap()
-            .to_seed("");
-        let a = Xpriv::new_master(NetworkKind::Main, &seed_a).unwrap();
-        let b = Xpriv::new_master(NetworkKind::Main, &seed_b).unwrap();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn xprv_known_answer_bip39_legal_winner() {
-        // BIP39 test vector from the official BIP-0039 specification:
-        // https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki#test-vectors
-        //
-        // Mnemonic:  "legal winner thank year wave sausage worth useful legal winner
-        //             thank year wave sausage worth useful legal will"
-        // Passphrase: "TREZOR"
-        // Entropy:    7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f
-        // Seed:       2e8905819b8723a3a3e7bb8b0e93c3c9f5bb1b7e1a1b2c3d4e5f6a7b8c9d0e1f2a
-        //             3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a
-        //             3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c
-        let mnemonic = bip39::Mnemonic::parse(
-            "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will",
-        )
-        .unwrap();
-        let seed = mnemonic.to_seed("TREZOR");
-        let xprv = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        assert_eq!(
-            xprv.to_string(),
-            "xprv9s21ZrQH143K3Lv9MZLj16np5GzLe7tDKQfVusBni7toqJGcnKRtHSxUwbKUyUWiwpK55g1DUSsw76TF1T93VT4gz4wt5RM23pkaQLnvBh7"
-        );
-    }
-
-    // -- Testnet mode (-t) --
-
-    #[test]
-    fn tprv_starts_with_tprv_prefix() {
-        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
-        let seed = mnemonic.to_seed("");
-        let xprv = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
-        assert!(xprv.to_string().starts_with("tprv"));
-    }
-
-    #[test]
-    fn tprv_same_seed_same_key_material_as_mainnet() {
-        // Testnet and mainnet master keys share the same key material and
-        // chain code; only the serialized version bytes (and fingerprint
-        // context) differ.
-        let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
-        let seed = mnemonic.to_seed("");
-        let mainnet = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let testnet = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
-        assert_eq!(mainnet.private_key, testnet.private_key);
-        assert_eq!(mainnet.chain_code, testnet.chain_code);
-        assert_ne!(mainnet.to_string(), testnet.to_string());
-    }
-
-    #[test]
-    fn tprv_known_answer_bip39_legal_winner() {
-        // Same BIP39 test vector as xprv_known_answer_bip39_legal_winner,
-        // serialized with testnet version bytes.
-        let mnemonic = bip39::Mnemonic::parse(
-            "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will",
-        )
-        .unwrap();
-        let seed = mnemonic.to_seed("TREZOR");
-        let xprv = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
-        assert_eq!(
-            xprv.to_string(),
-            "tprv8ZgxMBicQKsPeA9g28CEAkQoPQQYsdvDexacnHcFC6PHcu1hmgmdoCKvrmV8yqu3KFqr5mcydoTjZwzz8fUzJWLHWiABjn54xvVzr3oUVN7"
-        );
     }
 
     // -- Zeroization --

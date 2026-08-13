@@ -11,12 +11,11 @@ management. Correctness and secrecy of key material are the top priorities.
 ### [seedroller](seedroller/)
 
 Generate a BIP39 mnemonic seed phrase (24 words) from physical dice rolls,
-hardened with operating system RNG entropy, and derive the BIP32 master
-extended private key (xprv, or tprv with `-t`).
+hardened with operating system RNG entropy.
 
-Only the master key is written to standard output — the seed phrase and all
-other messages go to standard error — so it can be captured in a shell
-variable or piped straight into `keyderiver`:
+Only the seed words are written to standard output — everything else goes to
+standard error — so the phrase can be captured in a shell variable or piped
+straight into `keyderiver`:
 
 ```sh
 seedroller | keyderiver
@@ -27,10 +26,12 @@ verification details, and security notes.
 
 ### [keyderiver](keyderiver/)
 
-Derive BIP380 descriptor key expressions from an existing master extended
-private key (xprv/tprv). The master key is read via a hidden terminal prompt
-or from standard input when piped — never as a command-line argument, so it
-stays out of shell history and process listings.
+Derive BIP380 descriptor key expressions from a BIP39 seed phrase. The seed
+words are read via a terminal prompt or from standard input when piped —
+never as a command-line argument, so they stay out of shell history and
+process listings. The BIP32 master extended private key (xprv, or tprv with
+`-t`/`--testnet`) and its fingerprint are derived from the seed words, with
+an optional BIP39 passphrase (`-s`/`--secret`).
 
 Outputs both the secret and public account keys as BIP380 key expressions
 with the master fingerprint as origin and the BIP389 `/<0;1>/*` multipath

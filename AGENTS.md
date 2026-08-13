@@ -8,13 +8,15 @@ This repository is a Cargo workspace containing two security-sensitive
 cryptographic CLI tools for Bitcoin key management:
 
 - **`seedroller`** — generates a BIP39 mnemonic seed phrase (24 words) from
-  physical dice rolls, hardened with operating system RNG entropy, and derives
-  the BIP32 master extended private key (xprv/tprv). Only the master key is
-  written to stdout (everything else goes to stderr), so it can be piped
-  straight into `keyderiver`.
-- **`keyderiver`** — takes an existing master xprv/tprv and derives BIP380
-  descriptor key expressions (`[origin/purpose'/coin'/account']<key>/<0;1>/*`)
-  at a configurable BIP44 purpose and account index.
+  physical dice rolls, hardened with operating system RNG entropy. Only the
+  seed words are written to stdout (everything else goes to stderr), so the
+  phrase can be piped straight into `keyderiver`.
+- **`keyderiver`** — takes a BIP39 seed phrase (from a terminal prompt or
+  stdin), derives the BIP32 master extended private key (xprv, or tprv with
+  `-t`/`--testnet`) and its fingerprint, and derives BIP380 descriptor key
+  expressions (`[origin/purpose'/coin'/account']<key>/<0;1>/*`) at a
+  configurable BIP44 purpose and account index. An optional BIP39 passphrase
+  is prompted for with `-s`/`--secret`.
 
 Correctness and secrecy of key material are the top priorities.
 
@@ -25,11 +27,11 @@ Cargo.toml                — workspace manifest (members: seedroller, keyderive
 seedroller/
   Cargo.toml              — seedroller package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~860 lines)
+  src/main.rs             — entire application, including tests (~650 lines)
 keyderiver/
   Cargo.toml              — keyderiver package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~280 lines)
+  src/main.rs             — entire application, including tests (~460 lines)
 .github/workflows/        — CI: cargo test on PRs, nightly cargo audit
 ```
 
@@ -56,8 +58,8 @@ the behavior being tested).
 1. **`#![forbid(unsafe_code)]`** is set at the crate root. Never write
    `unsafe` code or remove this attribute.
 2. **Keep dependencies minimal.** Current deps: `bip39`, `clap`, `bitcoin`, `rand`,
-   `zeroize` (seedroller); `bitcoin`, `clap`, `zeroize` (keyderiver) — see each
-   crate's `Cargo.toml`. Do not add a new dependency without a strong
+   `zeroize` (seedroller); `bip39`, `bitcoin`, `clap`, `zeroize` (keyderiver) —
+   see each crate's `Cargo.toml`. Do not add a new dependency without a strong
    justification; prefer the standard library or existing crates.
 3. **Zeroize all sensitive material.** Any byte buffer, string, or struct
    holding dice rolls, entropy, seed bytes, passphrases, mnemonics, or keys
@@ -93,17 +95,15 @@ the behavior being tested).
   bind the `Result` to a variable first, wipe, then apply `?` — see
   keyderiver's `main`.
 - For seedroller, prefer `zeroize::Zeroizing` for the main owned secrets
-  (`rolls`, `entropy`, `passphrase`, `phrase`, and `seed`) so they are wiped
-  automatically on drop. Leave `bip39::Mnemonic` as-is because it already
-  zeroizes on drop, and keep explicit cleanup for `Xpriv` after the key has
-  been serialized to stdout: `private_key.non_secure_erase()` plus zeroizing
-  `chain_code` via its `AsMut<[u8; 32]>` impl.
+  (`rolls`, `entropy`, and `phrase`) so they are wiped automatically on drop.
+  Leave `bip39::Mnemonic` as-is because it already zeroizes on drop.
 - For keyderiver, prefer `zeroize::Zeroizing` for owned secret strings and
-  buffers (for example the master-key input and derived secret key expression)
-  so they are wiped automatically on drop, while keeping explicit cleanup for
-  `Xpriv` after use: both the master and the derived account key get
-  `private_key.non_secure_erase()` plus a `chain_code` zeroize via its
-  `AsMut<[u8; 32]>` impl.
+  buffers (for example the seed-word input, passphrase, BIP39 seed, and
+  derived secret key expression) so they are wiped automatically on drop.
+  Leave `bip39::Mnemonic` as-is because it already zeroizes on drop, and keep
+  explicit cleanup for `Xpriv` after use: both the master and the derived
+  account key get `private_key.non_secure_erase()` plus a `chain_code`
+  zeroize via its `AsMut<[u8; 32]>` impl.
 - If you change user-facing behavior or flags, update the relevant crate's
   `README.md` (it is the crate documentation, so stale docs break the docs
   contract).
@@ -139,7 +139,7 @@ rules:
    ```text
    feat: add checksum validation for roll input
 
-   Co-Authored-by: ExampleModel 9000 <examplemodel9000@agents.example.com>
+   Co-Authored-by: kimi-k3 <noreply@moonshot.ai>
    ```
 
 3. Only commit when explicitly asked. Before committing, run `cargo test` and

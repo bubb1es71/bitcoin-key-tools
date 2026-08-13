@@ -3,20 +3,23 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+use bitcoin::NetworkKind;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
 use bitcoin::secp256k1::Secp256k1;
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 use zeroize::{Zeroize, Zeroizing};
 
-/// Derive BIP380 descriptor key expressions from a master BIP32 extended key and BIP44
+/// Derive BIP380 descriptor key expressions from a BIP39 seed phrase and BIP44
 /// derivation path
 ///
-/// The master key (xprv or tprv) is read via a hidden terminal prompt, or from standard
-/// input when piped — never as a command-line argument, so it does not appear in shell
-/// history or process listings. The derived key expressions use BIP389 multipath wildcard
-/// covering both the receive (0) and change (1) chains. The key expressions inherit the
-/// master key's network version bytes (xprv/xpub or tprv/tpub).
+/// The seed words are read via a terminal prompt, or from standard input
+/// when piped — never as a command-line argument, so they do not appear in shell
+/// history or process listings. The BIP32 master extended private key (xprv) is
+/// derived from the seed words with an optional BIP39 passphrase. The derived key
+/// expressions use BIP389 multipath wildcard covering both the receive (0) and
+/// change (1) chains. Keys carry mainnet version bytes (xprv/xpub), or testnet
+/// version bytes (tprv/tpub) with BIP44 coin type 1' when `-t` is given.
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -27,12 +30,22 @@ struct Args {
     /// account
     #[arg(short, long, default_value_t = 0, value_parser = parse_hardened_index)]
     account: u32,
+
+    /// Prompt for a BIP39 passphrase to combine with the seed words when
+    /// creating the master key (prompted interactively, never on the
+    /// command line)
+    #[arg(short = 's', long, default_value_t = false)]
+    secret: bool,
+
+    /// Testnet mode (derive a testnet tprv master key and tprv/tpub key
+    /// expressions with BIP44 coin type 1')
+    #[arg(short, long, default_value_t = false)]
+    testnet: bool,
 }
 
-/// Parse a base58check-encoded master extended private key (xprv or tprv).
-fn parse_master_key(s: &str) -> Result<Xpriv, String> {
-    s.parse::<Xpriv>()
-        .map_err(|e| format!("invalid extended private key: {e}"))
+/// Parse a BIP39 mnemonic seed phrase, validating the words and checksum.
+fn parse_seed_words(s: &str) -> Result<bip39::Mnemonic, String> {
+    bip39::Mnemonic::parse(s).map_err(|e| format!("invalid seed phrase: {e}"))
 }
 
 /// Parse a BIP32 hardened child index, rejecting values that do not fit in a
@@ -47,81 +60,116 @@ fn parse_hardened_index(s: &str) -> Result<u32, String> {
     }
 }
 
-/// Disables terminal echo on creation and restores the original terminal
-/// settings on drop.
-struct EchoGuard {
-    saved: Option<String>,
-}
-
-impl EchoGuard {
-    /// Save current terminal settings and disable echo, so the master key is
-    /// not displayed as it is typed. Original settings are restored on drop.
-    fn new() -> Self {
-        let saved = Self::run_stty(&["-g"]);
-        if saved.is_some() {
-            Self::run_stty(&["-echo"]);
-        }
-        Self { saved }
-    }
-
-    /// Run `stty` with the given arguments on `/dev/tty`, returning trimmed
-    /// stdout on success. Returns `None` if the tty cannot be opened or the
-    /// command fails.
-    fn run_stty(args: &[&str]) -> Option<String> {
-        let tty = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-            .ok()?;
-        let output = std::process::Command::new("stty")
-            .args(args)
-            .stdin(std::process::Stdio::from(tty))
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
-    }
-}
-
-impl Drop for EchoGuard {
-    fn drop(&mut self) {
-        if let Some(ref s) = self.saved {
-            Self::run_stty(&[s]);
-        }
-    }
-}
-
-/// Read the master extended private key (xprv or tprv) without exposing it:
-/// interactively via a hidden terminal prompt (echo disabled), or from the
-/// first line of standard input when it is piped. The input string is
-/// zeroized on drop, including when an error is returned. Returns an error
-/// if reading or parsing fails.
-fn read_master_key() -> Result<Xpriv, String> {
+/// Read the BIP39 seed words: interactively via a terminal prompt, or from
+/// the first line of standard input when it is piped. What the user types is
+/// displayed as they type (echo is not disabled). The input string is
+/// zeroized on drop, including when an error is returned. Returns an error if
+/// reading or parsing fails.
+fn read_seed_words() -> Result<bip39::Mnemonic, String> {
     let mut input = Zeroizing::new(String::new());
     if io::stdin().is_terminal() {
-        print!("Master key (xprv or tprv): ");
+        print!("Seed words: ");
         io::stdout()
             .flush()
             .map_err(|e| format!("failed to flush stdout: {e}"))?;
-        let read_result = {
-            let _guard = EchoGuard::new();
-            io::stdin().read_line(&mut input)
-        }; // terminal echo is restored when the guard drops
-        println!(); // the user's Enter was not echoed; move to the next line
-        read_result.map_err(|e| format!("failed to read master key: {e}"))?;
+    }
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("failed to read seed words: {e}"))?;
+    parse_seed_words(input.trim())
+}
+
+/// Read the BIP39 passphrase: interactively via a terminal prompt, or from
+/// the second line of standard input when it is piped (the first line holds
+/// the seed words). If the pipe does not provide a second line, fall back to
+/// a prompt on the controlling terminal. What the user types is displayed as
+/// they type (echo is not disabled). Only the trailing line ending is
+/// stripped — other whitespace can be part of the passphrase. The buffer is
+/// zeroized on drop, including when an error is returned. Returns an error if
+/// reading fails or the input is empty.
+fn read_passphrase() -> Result<Zeroizing<String>, String> {
+    let mut passphrase = Zeroizing::new(String::new());
+    if io::stdin().is_terminal() {
+        prompt_passphrase(&mut io::stdin().lock(), &mut passphrase)?;
     } else {
         io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| format!("failed to read master key from stdin: {e}"))?;
+            .read_line(&mut passphrase)
+            .map_err(|e| format!("failed to read passphrase: {e}"))?;
+        trim_line_ending(&mut passphrase);
+        if passphrase.is_empty() {
+            // The pipe supplied no passphrase line; ask the user directly on
+            // the controlling terminal instead of failing.
+            let tty = std::fs::OpenOptions::new()
+                .read(true)
+                .open("/dev/tty")
+                .map_err(|e| {
+                    format!("no passphrase on standard input and cannot prompt for one: {e}")
+                })?;
+            prompt_passphrase(&mut io::BufReader::new(tty), &mut passphrase)?;
+        }
     }
-    parse_master_key(input.trim())
+    if passphrase.is_empty() {
+        return Err("empty passphrase; omit the -s flag to derive without one".to_string());
+    }
+    Ok(passphrase)
+}
+
+/// Prompt for the BIP39 passphrase and read one line from `reader` into
+/// `passphrase`, stripping the trailing line ending. What the user types is
+/// displayed on the terminal (echo is not disabled).
+fn prompt_passphrase(
+    reader: &mut impl io::BufRead,
+    passphrase: &mut Zeroizing<String>,
+) -> Result<(), String> {
+    print!("BIP39 passphrase: ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("failed to flush stdout: {e}"))?;
+    reader
+        .read_line(passphrase)
+        .map_err(|e| format!("failed to read passphrase: {e}"))?;
+    trim_line_ending(passphrase);
+    Ok(())
+}
+
+/// Strip a trailing line ending (`\r\n` or `\n`) from the string in place.
+/// Other whitespace is left untouched — it can be part of the passphrase.
+fn trim_line_ending(s: &mut String) {
+    while matches!(s.chars().last(), Some('\r' | '\n')) {
+        s.pop();
+    }
+}
+
+/// Derive the BIP32 master extended private key from a BIP39 mnemonic and
+/// passphrase, using mainnet (xprv) or testnet (tprv) version bytes. The
+/// intermediate BIP39 seed is zeroized on drop.
+fn master_key_from_seed(
+    mnemonic: &bip39::Mnemonic,
+    passphrase: &str,
+    network: NetworkKind,
+) -> Result<Xpriv, String> {
+    let seed = Zeroizing::new(mnemonic.to_seed(passphrase));
+    Xpriv::new_master(network, &seed[..]).map_err(|e| e.to_string())
 }
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
-    let mut master = read_master_key()?;
+    // Mnemonic implements ZeroizeOnDrop
+    let mnemonic = read_seed_words()?;
+    let passphrase = if args.secret {
+        read_passphrase()?
+    } else {
+        Zeroizing::new(String::new())
+    };
+    let network = if args.testnet {
+        NetworkKind::Test
+    } else {
+        NetworkKind::Main
+    };
+    let mut master = master_key_from_seed(&mnemonic, &passphrase, network)?;
 
     println!("\nmaster key: {}", master);
+    println!("fingerprint: {}", master.fingerprint(&Secp256k1::new()));
     println!("Derived keys for:");
     println!("purpose: {}", args.purpose);
     println!("account: {}", args.account);
@@ -185,7 +233,6 @@ fn bip380_account_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::NetworkKind;
 
     // -- BIP380 account keys --
 
@@ -262,28 +309,152 @@ mod tests {
         assert!(parse_hardened_index("abc").is_err());
     }
 
-    // -- Master key parsing --
+    // -- Seed word parsing --
 
     #[test]
-    fn parse_master_key_accepts_mainnet_xprv() {
-        // BIP39 "legal winner" test vector master key.
-        let key = parse_master_key(
-            "xprv9s21ZrQH143K3Lv9MZLj16np5GzLe7tDKQfVusBni7toqJGcnKRtHSxUwbKUyUWiwpK55g1DUSsw76TF1T93VT4gz4wt5RM23pkaQLnvBh7",
-        )
-        .unwrap();
-        assert!(key.network.is_mainnet());
+    fn parse_seed_words_accepts_valid_12_and_24_word_phrases() {
+        assert!(
+            parse_seed_words(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_seed_words(
+                "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
-    fn parse_master_key_rejects_xpub_and_malformed_input() {
-        // An extended public key is not usable as a master private key.
+    fn parse_seed_words_rejects_bad_checksum_unknown_word_and_empty_input() {
+        // Twelve times "abandon" fails the checksum check (valid phrase ends in "about").
         assert!(
-            parse_master_key(
-                "xpub6CWXS3XJKMTChnkP87ETxuT4hrZsfPCFFiELYffd9fMWBnkWUw44uL4dywAn8mksW7MkCNjXzeia1ZYdDRz5Jx3cmqg6AqJaZHqLdBZ81zV"
+            parse_seed_words(
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon"
             )
             .is_err()
         );
-        assert!(parse_master_key("notakey").is_err());
-        assert!(parse_master_key("").is_err());
+        assert!(
+            parse_seed_words(
+                "notaword abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+            )
+            .is_err()
+        );
+        assert!(parse_seed_words("").is_err());
+    }
+
+    // -- Passphrase input --
+
+    #[test]
+    fn prompt_passphrase_reads_line_and_strips_line_ending() {
+        let mut reader = io::BufReader::new(&b"hunter2\r\n"[..]);
+        let mut passphrase = Zeroizing::new(String::new());
+        prompt_passphrase(&mut reader, &mut passphrase).unwrap();
+        assert_eq!(&*passphrase, "hunter2");
+    }
+
+    #[test]
+    fn prompt_passphrase_preserves_other_whitespace() {
+        let mut reader = io::BufReader::new(&b"  two words  \n"[..]);
+        let mut passphrase = Zeroizing::new(String::new());
+        prompt_passphrase(&mut reader, &mut passphrase).unwrap();
+        assert_eq!(&*passphrase, "  two words  ");
+    }
+
+    #[test]
+    fn trim_line_ending_strips_lf_and_crlf_only() {
+        for (input, expected) in [
+            ("abc\n", "abc"),
+            ("abc\r\n", "abc"),
+            ("abc", "abc"),
+            ("abc ", "abc "),
+            ("", ""),
+        ] {
+            let mut s = String::from(input);
+            trim_line_ending(&mut s);
+            assert_eq!(s, expected);
+        }
+    }
+
+    // -- Master key derivation --
+
+    #[test]
+    fn master_key_known_answer_bip39_legal_winner() {
+        // BIP39 test vector from the official BIP-0039 specification:
+        // https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki#test-vectors
+        //
+        // Mnemonic:  "legal winner thank year wave sausage worth useful legal winner
+        //             thank year wave sausage worth useful legal will"
+        // Passphrase: "TREZOR"
+        // Entropy:    7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f
+        let mnemonic = parse_seed_words(
+            "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will",
+        )
+        .unwrap();
+        let master = master_key_from_seed(&mnemonic, "TREZOR", NetworkKind::Main).unwrap();
+        assert_eq!(
+            master.to_string(),
+            "xprv9s21ZrQH143K3Lv9MZLj16np5GzLe7tDKQfVusBni7toqJGcnKRtHSxUwbKUyUWiwpK55g1DUSsw76TF1T93VT4gz4wt5RM23pkaQLnvBh7"
+        );
+    }
+
+    #[test]
+    fn master_key_known_answer_bip39_legal_winner_testnet() {
+        // Same BIP39 test vector as master_key_known_answer_bip39_legal_winner,
+        // serialized with testnet version bytes.
+        let mnemonic = parse_seed_words(
+            "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal will",
+        )
+        .unwrap();
+        let master = master_key_from_seed(&mnemonic, "TREZOR", NetworkKind::Test).unwrap();
+        assert_eq!(
+            master.to_string(),
+            "tprv8ZgxMBicQKsPeA9g28CEAkQoPQQYsdvDexacnHcFC6PHcu1hmgmdoCKvrmV8yqu3KFqr5mcydoTjZwzz8fUzJWLHWiABjn54xvVzr3oUVN7"
+        );
+    }
+
+    #[test]
+    fn master_key_testnet_shares_key_material_with_mainnet() {
+        // Testnet and mainnet master keys share the same key material and
+        // chain code; only the serialized version bytes differ.
+        let mnemonic = parse_seed_words(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let mainnet = master_key_from_seed(&mnemonic, "", NetworkKind::Main).unwrap();
+        let testnet = master_key_from_seed(&mnemonic, "", NetworkKind::Test).unwrap();
+        assert_eq!(mainnet.private_key, testnet.private_key);
+        assert_eq!(mainnet.chain_code, testnet.chain_code);
+        assert_ne!(mainnet.to_string(), testnet.to_string());
+        assert!(testnet.to_string().starts_with("tprv"));
+    }
+
+    #[test]
+    fn master_key_fingerprint_matches_bip84_vector() {
+        // BIP-84 test vector: mnemonic "abandon ... about" has master
+        // fingerprint 73c5da0a. See:
+        // https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki
+        let mnemonic = parse_seed_words(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let master = master_key_from_seed(&mnemonic, "", NetworkKind::Main).unwrap();
+        assert_eq!(
+            master.fingerprint(&Secp256k1::new()).to_string(),
+            "73c5da0a"
+        );
+    }
+
+    #[test]
+    fn master_key_different_passphrases_different_keys() {
+        let mnemonic = parse_seed_words(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let a = master_key_from_seed(&mnemonic, "", NetworkKind::Main).unwrap();
+        let b = master_key_from_seed(&mnemonic, "secret", NetworkKind::Main).unwrap();
+        assert_ne!(a, b);
     }
 }
