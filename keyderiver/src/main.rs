@@ -7,7 +7,8 @@ use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv, Xpub};
 use bitcoin::secp256k1::Secp256k1;
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
-use zeroize::Zeroize;
+use std::process::ExitCode;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Derive BIP380 descriptor key expressions from a master BIP32 extended key and BIP44
 /// derivation path
@@ -94,10 +95,10 @@ impl Drop for EchoGuard {
 /// Read the master extended private key (xprv or tprv) without exposing it:
 /// interactively via a hidden terminal prompt (echo disabled), or from the
 /// first line of standard input when it is piped. The input string is
-/// zeroized after parsing. Prints an error to stderr and exits with code 1
+/// zeroized on drop, including when an error is returned. Returns an error
 /// if reading or parsing fails.
-fn read_master_key() -> Xpriv {
-    let mut input = String::new();
+fn read_master_key() -> Result<Xpriv, String> {
+    let mut input = Zeroizing::new(String::new());
     if io::stdin().is_terminal() {
         print!("Master key (xprv or tprv): ");
         io::stdout().flush().expect("failed to flush stdout");
@@ -107,40 +108,35 @@ fn read_master_key() -> Xpriv {
         }; // terminal echo is restored when the guard drops
         println!(); // the user's Enter was not echoed; move to the next line
         if let Err(e) = read_result {
-            input.zeroize();
-            eprintln!("error: failed to read master key: {e}");
-            std::process::exit(1);
+            return Err(format!("failed to read master key: {e}"));
         }
     } else if let Err(e) = io::stdin().read_line(&mut input) {
-        input.zeroize();
-        eprintln!("error: failed to read master key from stdin: {e}");
-        std::process::exit(1);
+        return Err(format!("failed to read master key from stdin: {e}"));
     }
-    let parsed = parse_master_key(input.trim());
-    input.zeroize();
-    match parsed {
+    parse_master_key(input.trim())
+}
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+    let mut master = match read_master_key() {
         Ok(master) => master,
         Err(e) => {
             eprintln!("error: {e}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
-    }
-}
-
-fn main() {
-    let args = Args::parse();
-    let mut master = read_master_key();
+    };
 
     println!("\nmaster key: {}", master);
     println!("Derived keys for:");
     println!("purpose: {}", args.purpose);
     println!("account: {}", args.account);
 
-    let (mut seckey, pubkey) = bip380_account_keys(&master, args.purpose, args.account);
+    let (seckey, pubkey) = bip380_account_keys(&master, args.purpose, args.account);
     master.private_key.non_secure_erase();
-    println!("\nSecret account key: {}", seckey);
+    <bitcoin::bip32::ChainCode as AsMut<[u8; 32]>>::as_mut(&mut master.chain_code).zeroize();
+    println!("\nSecret account key: {}", *seckey);
     println!("Public account key: {}", pubkey);
-    seckey.zeroize();
+    ExitCode::SUCCESS
 }
 
 /// Derive the BIP44 account-level keys from a master xprv and return BIP380 descriptor
@@ -151,7 +147,7 @@ fn main() {
 /// fingerprint is that of the master key, and `/<0;1>/*` is the BIP389 multipath
 /// wildcard covering both the receive (0) and change (1) chains. The account keys
 /// inherit the master's network version bytes (xprv/xpub or tprv/tpub).
-fn bip380_account_keys(master: &Xpriv, purpose: u32, account: u32) -> (String, String) {
+fn bip380_account_keys(master: &Xpriv, purpose: u32, account: u32) -> (Zeroizing<String>, String) {
     let secp = Secp256k1::new();
     let coin_type = if master.network.is_mainnet() { 0 } else { 1 };
     let path = DerivationPath::from(vec![
@@ -170,8 +166,10 @@ fn bip380_account_keys(master: &Xpriv, purpose: u32, account: u32) -> (String, S
         coin_type,
         account
     );
-    let xprv_expr = format!("{}{}/<0;1>/*", origin, account_xprv);
+    let xprv_expr = Zeroizing::new(format!("{}{}/<0;1>/*", origin, account_xprv));
+    // Safe to wipe: the account key has already been serialized into the expression.
     account_xprv.private_key.non_secure_erase();
+    <bitcoin::bip32::ChainCode as AsMut<[u8; 32]>>::as_mut(&mut account_xprv.chain_code).zeroize();
     let xpub_expr = format!("{}{}/<0;1>/*", origin, account_xpub);
     (xprv_expr, xpub_expr)
 }
@@ -198,7 +196,7 @@ mod tests {
         let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
         let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0);
         assert_eq!(
-            xprv_expr,
+            &*xprv_expr,
             "[73c5da0a/84'/0'/0']xprv9ybY78BftS5UGANki6oSifuQEjkpyAC8ZmBvBNTshQnCBcxnefjHS7buPMkkqhcRzmoGZ5bokx7GuyDAiktd5HemohAU4wV1ZPMDRmLpBMm/<0;1>/*"
         );
         assert_eq!(

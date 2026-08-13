@@ -25,11 +25,11 @@ Cargo.toml                — workspace manifest (members: seedroller, keyderive
 seedroller/
   Cargo.toml              — seedroller package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~800 lines)
+  src/main.rs             — entire application, including tests (~860 lines)
 keyderiver/
   Cargo.toml              — keyderiver package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~150 lines)
+  src/main.rs             — entire application, including tests (~280 lines)
 .github/workflows/        — CI: cargo test on PRs, nightly cargo audit
 ```
 
@@ -75,6 +75,23 @@ the behavior being tested).
 - Standard Rust style (`rustfmt` defaults); edition 2024.
 - Simple, direct code — this is a small audit-friendly tool, not a framework.
 - Exit codes: `0` for help/success, `1` for errors; errors go to stderr.
+- Never call `std::process::exit` — it terminates the process without running
+  destructors, so `Zeroizing` values would not be wiped. Fallible helpers
+  return `Result` and `main` returns `std::process::ExitCode`
+  (`ExitCode::FAILURE` for errors), so secrets are dropped and wiped on
+  every exit path.
+- For seedroller, prefer `zeroize::Zeroizing` for the main owned secrets
+  (`rolls`, `entropy`, `passphrase`, `phrase`, and `seed`) so they are wiped
+  automatically on drop. Leave `bip39::Mnemonic` as-is because it already
+  zeroizes on drop, and keep explicit cleanup for `Xpriv` after the key has
+  been serialized to stdout: `private_key.non_secure_erase()` plus zeroizing
+  `chain_code` via its `AsMut<[u8; 32]>` impl.
+- For keyderiver, prefer `zeroize::Zeroizing` for owned secret strings and
+  buffers (for example the master-key input and derived secret key expression)
+  so they are wiped automatically on drop, while keeping explicit cleanup for
+  `Xpriv` after use: both the master and the derived account key get
+  `private_key.non_secure_erase()` plus a `chain_code` zeroize via its
+  `AsMut<[u8; 32]>` impl.
 - If you change user-facing behavior or flags, update the relevant crate's
   `README.md` (it is the crate documentation, so stale docs break the docs
   contract).

@@ -11,7 +11,9 @@ use clap::Parser;
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use std::io::{self, IsTerminal, Read, Write};
-use zeroize::Zeroize;
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Minimum dice rolls before the user may finish. 100 fair rolls yield ~258.5 bits
 /// of Shannon entropy, just above the 256-bit threshold.
@@ -23,6 +25,10 @@ const SYSTEM_ENTROPY_BYTES: usize = 32;
 /// Minimum Shannon entropy required across all dice rolls, in bits.
 /// Set to 256 so the dice alone can produce a strong seed even without OS entropy.
 const MIN_ENTROPY_BITS: f64 = 256.0;
+
+/// Maximum number of OS RNG draws the startup sanity check makes while trying
+/// to observe a nonzero byte in every output position before giving up.
+const SANITY_CHECK_MAX_TRIES: usize = 1024;
 
 /// Create a BIP39 seed mnemonic and corresponding BIP32 master key from dice
 /// rolls and operating system RNG entropy
@@ -43,33 +49,46 @@ struct Args {
     passphrase: bool,
 }
 
-fn main() {
+fn main() -> ExitCode {
     let args = Args::parse();
-    let mut passphrase = if args.passphrase {
-        read_passphrase()
+
+    // Refuse to run on a platform with a broken RNG or clock, before any key
+    // material is handled (mirrors Bitcoin Core's Random_SanityCheck()).
+    if let Err(msg) = check_rng_sanity() {
+        eprintln!("\x1b[1mERROR: {}\x1b[0m", msg);
+        return ExitCode::FAILURE;
+    }
+
+    let passphrase = if args.passphrase {
+        match read_passphrase() {
+            Ok(passphrase) => passphrase,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
     } else {
-        String::new()
+        Zeroizing::new(String::new())
     };
-    eprintln!("Press keys 1-6 for each dice roll. Backspace to undo.");
+    eprintln!("Press keys 1-6 for each dice roll.");
     eprintln!(
         "After {} rolls, press Enter to finish (or keep adding rolls).",
         MIN_DICE_ROLLS
     );
     eprintln!();
 
-    let mut rolls = collect_dice_rolls();
+    let rolls = collect_dice_rolls();
     eprintln!("\nCollected {} dice rolls.", rolls.len());
 
-    if let Err(msg) = check_entropy_strength(&rolls) {
+    if let Err(msg) = check_entropy_strength(&rolls[..]) {
         eprintln!("\n\x1b[1mERROR: {}\x1b[0m", msg);
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
 
-    let mut entropy = generate_entropy(&rolls, args.reproducible);
-    rolls.zeroize();
+    let entropy = generate_entropy(&rolls[..], args.reproducible);
 
-    let mut mnemonic = bip39::Mnemonic::from_entropy(&entropy).expect("32-byte entropy is valid");
-    entropy.zeroize();
+    // Mnemonic implements ZeroizeOnDrop
+    let mnemonic = bip39::Mnemonic::from_entropy(&entropy[..]).expect("32-byte entropy is valid");
 
     eprintln!("\nYour BIP39 seed phrase (24 words):\n");
     eprintln!("WARNING: This seed phrase will remain in your terminal scrollback.");
@@ -78,14 +97,13 @@ fn main() {
         eprintln!("  {:>2}. {}", i + 1, word);
     }
     eprintln!();
-    let mut phrase = mnemonic.to_string();
-    eprintln!("{}", phrase);
-    phrase.zeroize();
+    let phrase = Zeroizing::new(mnemonic.to_string());
+    eprintln!("{}", *phrase);
 
     if passphrase.is_empty() {
         eprintln!("\nNo passphrase.");
     } else {
-        eprintln!("\nPassphrase: {}", passphrase);
+        eprintln!("\nPassphrase used to create the xprv.");
     }
 
     // Derive and display the master extended private key from the BIP39 seed.
@@ -95,13 +113,10 @@ fn main() {
     } else {
         NetworkKind::Main
     };
-    let mut seed = mnemonic.to_seed(&passphrase);
+    let seed = Zeroizing::new(mnemonic.to_seed(&*passphrase));
     let secp = Secp256k1::new();
-    let mut xprv =
-        Xpriv::new_master(network, &seed).expect("64-byte seed always produces a valid master key");
-    seed.zeroize();
-    passphrase.zeroize();
-    mnemonic.zeroize();
+    let mut xprv = Xpriv::new_master(network, &seed[..])
+        .expect("64-byte seed always produces a valid master key");
 
     let prefix = if args.testnet { "tprv" } else { "xprv" };
     eprintln!("\nMaster extended private key:");
@@ -109,29 +124,29 @@ fn main() {
     eprint!("{}: ", prefix);
     // send the xprv to standard output so it can be piped to keyderiver
     println!("{}", xprv);
+    // Safe to wipe: the xprv has already been serialized to stdout.
     xprv.private_key.non_secure_erase();
+    <bitcoin::bip32::ChainCode as AsMut<[u8; SYSTEM_ENTROPY_BYTES]>>::as_mut(&mut xprv.chain_code)
+        .zeroize();
+    ExitCode::SUCCESS
 }
 
 /// Mix dice rolls with OS RNG entropy (unless reproducible mode) into a 32-byte hash.
 /// Zeroizes all intermediates before returning.
-fn generate_entropy(rolls: &[u8], reproducible: bool) -> [u8; SYSTEM_ENTROPY_BYTES] {
-    let mut system_entropy = if reproducible {
+fn generate_entropy(rolls: &[u8], reproducible: bool) -> Zeroizing<[u8; SYSTEM_ENTROPY_BYTES]> {
+    let system_entropy = if reproducible {
         eprintln!(
             "\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m"
         );
         eprintln!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
-        Vec::new()
+        Zeroizing::new(Vec::new())
     } else {
-        let mut raw = read_system_entropy();
-        let v = raw.to_vec();
-        raw.zeroize();
-        eprintln!("Read {} bytes from operating system RNG.", v.len());
-        v
+        let raw = read_system_entropy();
+        eprintln!("Read {} bytes from operating system RNG.", raw.len());
+        raw
     };
 
-    let entropy = combine_and_hash(rolls, &system_entropy);
-    system_entropy.zeroize();
-    entropy
+    combine_and_hash(rolls, &system_entropy)
 }
 
 /// Restores terminal settings on drop.
@@ -190,47 +205,46 @@ impl Drop for TermGuard {
 /// Read the BIP39 passphrase without exposing it: interactively via a hidden
 /// terminal prompt (echo disabled), or from the first line of standard input
 /// when it is piped. Only the trailing line ending is stripped — other
-/// whitespace can be part of the passphrase. Prints an error to stderr and
-/// exits with code 1 if reading fails or the input is empty.
-fn read_passphrase() -> String {
-    let mut input = String::new();
+/// whitespace can be part of the passphrase. The buffer is zeroized on drop,
+/// including when an error is returned. Returns an error if reading fails
+/// or the input is empty.
+fn read_passphrase() -> Result<Zeroizing<String>, String> {
+    let mut passphrase = Zeroizing::new(String::new());
     let read_result = if io::stdin().is_terminal() {
         eprint!("BIP39 passphrase: ");
         io::stdout().flush().expect("failed to flush stdout");
         let result = {
             let _guard = TermGuard::new_no_echo();
-            io::stdin().read_line(&mut input)
+            io::stdin().read_line(&mut passphrase)
         }; // terminal echo is restored when the guard drops
         eprintln!(); // the user's Enter was not echoed; move to the next line
         result
     } else {
-        io::stdin().read_line(&mut input)
+        io::stdin().read_line(&mut passphrase)
     };
     if let Err(e) = read_result {
-        input.zeroize();
-        eprintln!("error: failed to read passphrase: {e}");
-        std::process::exit(1);
+        return Err(format!("failed to read passphrase: {e}"));
     }
-    let passphrase = input.trim_end_matches(['\r', '\n']).to_string();
-    input.zeroize();
+    // trim line ending in place
+    while matches!(passphrase.chars().last(), Some('\r' | '\n')) {
+        passphrase.pop();
+    }
     if passphrase.is_empty() {
-        eprintln!("error: empty passphrase; omit the -p flag to derive without one");
-        std::process::exit(1);
+        return Err("empty passphrase; omit the -p flag to derive without one".to_string());
     }
-    passphrase
+    Ok(passphrase)
 }
 
 /// Interactively collect dice rolls from the user via raw keypress input.
 ///
 /// Reads single bytes from stdin in cbreak mode. Keys 1–6 append a roll,
-/// Backspace/Delete removes the last roll, Enter finishes once the minimum
-/// roll count is met and entropy checks pass. Returns the collected rolls
-/// as a vector of values 1–6.
-fn collect_dice_rolls() -> Vec<u8> {
+/// Enter finishes once the minimum roll count is met and entropy checks
+/// pass. Returns the collected rolls as a vector of values 1–6.
+fn collect_dice_rolls() -> Zeroizing<Vec<u8>> {
     let _guard = TermGuard::new();
     let stdin = io::stdin();
     let mut lock = stdin.lock();
-    let mut rolls: Vec<u8> = Vec::new();
+    let mut rolls: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
     let mut byte = [0u8; 1];
 
     loop {
@@ -252,13 +266,6 @@ fn collect_dice_rolls() -> Vec<u8> {
             b'1'..=b'6' => {
                 rolls.push(byte[0] - b'0');
                 eprintln!();
-            }
-            0x7f | 0x08 => {
-                if rolls.pop().is_some() {
-                    eprintln!("(removed, back to {})", rolls.len());
-                } else {
-                    eprintln!();
-                }
             }
             b'\n' | b'\r' => {
                 if rolls.len() >= MIN_DICE_ROLLS {
@@ -342,29 +349,67 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
 /// Uses `OsRng` which delegates to `getrandom` — the platform-native secure
 /// RNG (getrandom syscall on Linux, getentropy on macOS, BCryptGenRandom on
 /// Windows). Panics if the OS RNG is unavailable.
-fn read_system_entropy() -> [u8; SYSTEM_ENTROPY_BYTES] {
-    let mut buf = [0u8; SYSTEM_ENTROPY_BYTES];
+fn read_system_entropy() -> Zeroizing<Vec<u8>> {
+    let mut buf = Zeroizing::new([0u8; SYSTEM_ENTROPY_BYTES]);
     OsRng
-        .try_fill_bytes(&mut buf)
+        .try_fill_bytes(&mut *buf)
         .expect("failed to read from operating system RNG");
-    buf
+    Zeroizing::new(buf.to_vec())
+}
+
+/// Runtime sanity check of the operating system RNG and monotonic clock,
+/// modeled on Bitcoin Core's `Random_SanityCheck()`. See:
+/// https://github.com/bitcoin/bitcoin/pull/9821
+///
+/// This does not measure the quality of the randomness; it detects a
+/// catastrophically broken platform (e.g. an RNG that returns constant bytes)
+/// at startup, before any key material is derived:
+///
+/// - Every byte position of a 32-byte OS RNG draw must be observed nonzero at
+///   least once within [`SANITY_CHECK_MAX_TRIES`] draws. A healthy CSPRNG
+///   passes within one or two draws with overwhelming probability.
+/// - The monotonic clock must advance across a 1ms sleep.
+///
+/// Returns an error describing the failure; the caller should refuse to run.
+fn check_rng_sanity() -> Result<(), String> {
+    let mut nonzero_seen = [false; SYSTEM_ENTROPY_BYTES];
+    for _ in 0..SANITY_CHECK_MAX_TRIES {
+        let draw = read_system_entropy();
+        for (i, &b) in draw.iter().enumerate() {
+            nonzero_seen[i] |= b != 0;
+        }
+        if nonzero_seen.iter().all(|&b| b) {
+            break;
+        }
+    }
+    if !nonzero_seen.iter().all(|&b| b) {
+        return Err(format!(
+            "OS RNG sanity check failed: some byte positions were zero in all {} draws.\n\
+             Do not generate keys on this system.",
+            SANITY_CHECK_MAX_TRIES
+        ));
+    }
+
+    let start = Instant::now();
+    std::thread::sleep(Duration::from_millis(1));
+    if Instant::now() == start {
+        return Err("Clock sanity check failed: monotonic clock did not advance.".to_string());
+    }
+
+    Ok(())
 }
 
 /// Combine dice rolls with OS entropy into a 32-byte SHA-256 hash.
 ///
 /// The input is `rolls || system_entropy`, hashed with SHA-256.
 /// The intermediate buffer is zeroized before returning.
-fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> [u8; SYSTEM_ENTROPY_BYTES] {
-    let mut data = Vec::with_capacity(rolls.len() + system_entropy.len());
+fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> Zeroizing<[u8; SYSTEM_ENTROPY_BYTES]> {
+    let mut data = Zeroizing::new(Vec::with_capacity(rolls.len() + system_entropy.len()));
     data.extend_from_slice(rolls);
     data.extend_from_slice(system_entropy);
 
     let hash = sha256::Hash::hash(&data);
-    data.zeroize();
-
-    let mut out = [0u8; SYSTEM_ENTROPY_BYTES];
-    out.copy_from_slice(hash.as_ref());
-    out
+    Zeroizing::new(hash.to_byte_array())
 }
 
 #[cfg(test)]
@@ -467,6 +512,15 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    // -- check_rng_sanity --
+
+    #[test]
+    fn sanity_check_passes_on_healthy_system() {
+        // Mirrors Bitcoin Core's osrandom_tests: on a working platform the
+        // startup sanity check must succeed.
+        assert!(check_rng_sanity().is_ok());
+    }
+
     // -- BIP39 integration --
 
     #[test]
@@ -474,7 +528,7 @@ mod tests {
         let rolls = vec![1, 2, 3, 4, 5, 6];
         let sys = [0xAB; SYSTEM_ENTROPY_BYTES];
         let entropy = combine_and_hash(&rolls, &sys);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         assert_eq!(mnemonic.words().count(), 24);
     }
 
@@ -483,7 +537,7 @@ mod tests {
         let rolls = vec![3, 1, 4, 1, 5, 6, 2, 6, 5, 3];
         let sys = [0xCD; SYSTEM_ENTROPY_BYTES];
         let entropy = combine_and_hash(&rolls, &sys);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         let phrase = mnemonic.to_string();
         let parsed = bip39::Mnemonic::parse(&phrase).unwrap();
         assert_eq!(mnemonic, parsed);
@@ -492,7 +546,7 @@ mod tests {
     #[test]
     fn entropy_from_empty_rolls_and_entropy_produces_valid_mnemonic() {
         let entropy = combine_and_hash(&[], &[]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         assert_eq!(mnemonic.words().count(), 24);
     }
 
@@ -501,15 +555,15 @@ mod tests {
     #[test]
     fn reproducible_same_rolls_same_mnemonic() {
         let rolls = vec![1, 2, 3, 4, 5, 6, 1, 2, 3, 4];
-        let a = bip39::Mnemonic::from_entropy(&combine_and_hash(&rolls, &[])).unwrap();
-        let b = bip39::Mnemonic::from_entropy(&combine_and_hash(&rolls, &[])).unwrap();
+        let a = bip39::Mnemonic::from_entropy(&*combine_and_hash(&rolls, &[])).unwrap();
+        let b = bip39::Mnemonic::from_entropy(&*combine_and_hash(&rolls, &[])).unwrap();
         assert_eq!(a, b);
     }
 
     #[test]
     fn reproducible_different_rolls_different_mnemonic() {
-        let a = bip39::Mnemonic::from_entropy(&combine_and_hash(&[1, 2, 3], &[])).unwrap();
-        let b = bip39::Mnemonic::from_entropy(&combine_and_hash(&[4, 5, 6], &[])).unwrap();
+        let a = bip39::Mnemonic::from_entropy(&*combine_and_hash(&[1, 2, 3], &[])).unwrap();
+        let b = bip39::Mnemonic::from_entropy(&*combine_and_hash(&[4, 5, 6], &[])).unwrap();
         assert_ne!(a, b);
     }
 
@@ -542,9 +596,9 @@ mod tests {
             0xd2, 0x59, 0x7d, 0x7d, 0x8e, 0x45, 0x57, 0x2a, 0x5d, 0xc0, 0x38, 0xa7, 0xc8, 0x6c,
             0x71, 0x73, 0x9a, 0x01,
         ];
-        assert_eq!(entropy, expected);
+        assert_eq!(*entropy, expected);
 
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
 
         let expected_phrase = "assault minute subject version century refuse foster resist kit oval region real style shrimp best torch fruit achieve clarify move shove right gym decline";
         assert_eq!(mnemonic.to_string(), expected_phrase);
@@ -676,7 +730,7 @@ mod tests {
     #[test]
     fn xprv_deterministic_from_mnemonic() {
         let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         let seed = mnemonic.to_seed("");
         let a = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
         let b = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
@@ -686,7 +740,7 @@ mod tests {
     #[test]
     fn xprv_roundtrip_mnemonic_seed_xprv_mnemonic() {
         let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         let phrase = mnemonic.to_string();
 
         // Parse the phrase back, derive seed, get xprv
@@ -705,7 +759,7 @@ mod tests {
     #[test]
     fn xprv_starts_with_xprv_prefix() {
         let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         let seed = mnemonic.to_seed("");
         let xprv = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
         assert!(xprv.to_string().starts_with("xprv"));
@@ -715,10 +769,10 @@ mod tests {
     fn xprv_different_mnemonics_different_xprvs() {
         let entropy_a = combine_and_hash(&[1, 2, 3], &[0xAA; SYSTEM_ENTROPY_BYTES]);
         let entropy_b = combine_and_hash(&[4, 5, 6], &[0xBB; SYSTEM_ENTROPY_BYTES]);
-        let seed_a = bip39::Mnemonic::from_entropy(&entropy_a)
+        let seed_a = bip39::Mnemonic::from_entropy(&*entropy_a)
             .unwrap()
             .to_seed("");
-        let seed_b = bip39::Mnemonic::from_entropy(&entropy_b)
+        let seed_b = bip39::Mnemonic::from_entropy(&*entropy_b)
             .unwrap()
             .to_seed("");
         let a = Xpriv::new_master(NetworkKind::Main, &seed_a).unwrap();
@@ -755,7 +809,7 @@ mod tests {
     #[test]
     fn tprv_starts_with_tprv_prefix() {
         let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         let seed = mnemonic.to_seed("");
         let xprv = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
         assert!(xprv.to_string().starts_with("tprv"));
@@ -767,7 +821,7 @@ mod tests {
         // chain code; only the serialized version bytes (and fingerprint
         // context) differ.
         let entropy = combine_and_hash(&[1, 2, 3, 4, 5, 6], &[0xAB; SYSTEM_ENTROPY_BYTES]);
-        let mnemonic = bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        let mnemonic = bip39::Mnemonic::from_entropy(&*entropy).unwrap();
         let seed = mnemonic.to_seed("");
         let mainnet = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
         let testnet = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();

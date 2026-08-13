@@ -67,7 +67,7 @@ cargo test
 - **Run in an ephemeral environment.** For improved security, only run this on a local temporary system such as [TAILS](https://tails.net) — a live operating system that runs from a USB stick, leaves no trace on shutdown, and keeps your seed phrase off your everyday machine.
 - **The master key is never taken as a command-line argument.** It is read via a hidden terminal prompt (echo disabled) or from standard input when piped, keeping it out of shell history and process listings. Note that when piping, the command producing the key must not itself record it — good producers are `seedroller`, which writes only the master key to standard output, and password managers such as [`pass`](https://www.passwordstore.org), which decrypt straight to stdout.
 - **Write down your master key and derived xprv on paper.** Both are displayed on screen so they can be transcribed — and both remain in your terminal scrollback, so clear it with `clear` when done.
-- Sensitive key material is scrubbed from memory after use: the master key and the derived account private key are erased, and the printed secret key expression string is zeroed via [`zeroize`](https://crates.io/crates/zeroize).
+- Sensitive key material is scrubbed from memory after use. The master-key input string and printed secret key expression are wrapped in [`Zeroizing`](https://crates.io/crates/zeroize), so they are wiped automatically on drop. The master and derived account extended private keys have their secret fields (private key and chain code) erased explicitly after use.
 - The crate forbids `unsafe` code (`#![forbid(unsafe_code)]`).
 - Dependencies are minimal: `bitcoin`, `clap`, `zeroize`.
 
