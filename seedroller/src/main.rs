@@ -5,8 +5,6 @@
 
 use bitcoin::hashes::{Hash, sha256};
 use clap::Parser;
-use rand::TryRngCore;
-use rand::rngs::OsRng;
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -15,7 +13,7 @@ use zeroize::Zeroizing;
 /// of Shannon entropy, just above the 256-bit threshold.
 const MIN_DICE_ROLLS: usize = 100;
 
-/// Bytes read from the OS CSPRNG (via `getrandom` under the hood). 32 bytes = 256 bits.
+/// Bytes read from the OS CSPRNG via `getrandom`. 32 bytes = 256 bits.
 const SYSTEM_ENTROPY_BYTES: usize = 32;
 
 /// Minimum Shannon entropy required across all dice rolls, in bits.
@@ -251,13 +249,12 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
 
 /// Fill a 32-byte buffer from the operating system's cryptographic RNG.
 ///
-/// Uses `OsRng` which delegates to `getrandom` — the platform-native secure
-/// RNG (getrandom syscall on Linux, getentropy on macOS, BCryptGenRandom on
+/// Uses the `getrandom` crate — the platform-native secure RNG interface
+/// (getrandom syscall on Linux, getentropy on macOS, BCryptGenRandom on
 /// Windows). Returns an error if the OS RNG is unavailable.
 fn read_system_entropy() -> Result<Zeroizing<Vec<u8>>, String> {
     let mut buf = Zeroizing::new([0u8; SYSTEM_ENTROPY_BYTES]);
-    OsRng
-        .try_fill_bytes(&mut *buf)
+    getrandom::fill(&mut *buf)
         .map_err(|e| format!("failed to read from operating system RNG: {e}"))?;
     Ok(Zeroizing::new(buf.to_vec()))
 }

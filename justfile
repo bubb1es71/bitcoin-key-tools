@@ -10,11 +10,15 @@ target := "x86_64-unknown-linux-musl"
 # `cross` inside a pinned container (see Cross.toml) with a pinned toolchain
 # (see rust-toolchain.toml). Byte-for-byte identical output across builders.
 #
+# The RUSTFLAGS env var overrides the per-target rustflags in
+# .cargo/config.toml, so it must repeat the getrandom_backend cfg to keep the
+# musl build on the fail-closed getrandom(2) backend (see .cargo/config.toml).
+#
 # Requires: Docker (running) or Podman, plus `cross` and the target toolchain.
 release-linux:
     SOURCE_DATE_EPOCH=0 \
     CARGO_BUILD_TARGET={{ target }} \
-    RUSTFLAGS="--remap-path-prefix=$HOME=/build -C strip=symbols" \
+    RUSTFLAGS="--remap-path-prefix=$HOME=/build -C strip=symbols --cfg getrandom_backend=\"linux_getrandom\"" \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc \
     cross build --release
 

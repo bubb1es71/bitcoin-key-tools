@@ -24,6 +24,9 @@ Correctness and secrecy of key material are the top priorities.
 
 ```text
 Cargo.toml                — workspace manifest (members: seedroller, keyderiver)
+.cargo/config.toml        — forces getrandom's fail-closed linux_getrandom backend
+                            on all Linux targets (no /dev/urandom fallback);
+                            keep in sync with the RUSTFLAGS in justfile release-linux
 seedroller/
   Cargo.toml              — seedroller package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
@@ -57,10 +60,11 @@ the behavior being tested).
 
 1. **`#![forbid(unsafe_code)]`** is set at the crate root. Never write
    `unsafe` code or remove this attribute.
-2. **Keep dependencies minimal.** Current deps: `bip39`, `clap`, `bitcoin`, `rand`,
-   `zeroize` (seedroller); `bip39`, `bitcoin`, `clap`, `zeroize` (keyderiver) —
-   see each crate's `Cargo.toml`. Do not add a new dependency without a strong
-   justification; prefer the standard library or existing crates.
+2. **Keep dependencies minimal.** Current deps: `bip39`, `clap`, `bitcoin`,
+   `getrandom`, `zeroize` (seedroller); `bip39`, `bitcoin`, `clap`, `zeroize`
+   (keyderiver) — see each crate's `Cargo.toml`. Do not add a new dependency
+   without a strong justification; prefer the standard library or existing
+   crates.
 3. **Zeroize all sensitive material.** Any byte buffer, string, or struct
    holding dice rolls, entropy, seed bytes, passphrases, mnemonics, or keys
    must be wiped with `zeroize` after use, matching the existing pattern in
@@ -68,7 +72,10 @@ the behavior being tested).
 4. **Never weaken the entropy checks** (`MIN_DICE_ROLLS`, `MIN_ENTROPY_BITS`,
    `check_entropy_strength`) or the default behavior of
    mixing OS RNG entropy. The `-r` reproducible mode exists only for testing
-   and must keep its bold warning.
+   and must keep its bold warning. Do not remove the
+   `getrandom_backend="linux_getrandom"` cfg (`.cargo/config.toml` and the
+   justfile `release-linux` RUSTFLAGS) — it keeps OS entropy fail-closed on
+   the getrandom(2) syscall with no `/dev/urandom` fallback.
 5. **Doc comments** (`///`) are required on all functions, methods, and
    constants — this is an established convention in the codebase.
 

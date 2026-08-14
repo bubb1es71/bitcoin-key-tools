@@ -1,0 +1,13 @@
+# Force the getrandom crate's `linux_getrandom` backend (the getrandom(2)
+# syscall via libc, erroring if unavailable) on all Linux targets. The default
+# musl and Android backends silently fall back to reading /dev/urandom when
+# the syscall is missing (kernel < 3.17) or blocked by seccomp — fail closed
+# instead. (linux-gnu targets already default to a syscall-only backend.)
+#
+# macOS and Windows builds are unaffected by this table: they use
+# getentropy/ProcessPrng with no file fallback at all.
+#
+# NOTE: the RUSTFLAGS env var overrides these per-target rustflags — keep the
+# justfile `release-linux` RUSTFLAGS in sync with this setting.
+[target.'cfg(target_os = "linux")']
+rustflags = ['--cfg', 'getrandom_backend="linux_getrandom"']

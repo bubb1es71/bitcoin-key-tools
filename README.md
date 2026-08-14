@@ -61,6 +61,13 @@ committed to this repository:
   immutable digest, fixing the toolchain, linker, and libc.
 - [`rust-toolchain.toml`](rust-toolchain.toml) — pins the exact Rust compiler
   version and target.
+- [`.cargo/config.toml`](.cargo/config.toml) — forces the `getrandom` crate's
+  fail-closed `linux_getrandom` backend on all Linux targets: OS entropy comes
+  only from the `getrandom(2)` syscall, which errors if unavailable, instead
+  of the backends that silently fall back to reading `/dev/urandom` (the
+  default on musl targets). (The `just release-linux` recipe repeats the cfg
+  in its `RUSTFLAGS`, since the environment variable overrides per-target
+  rustflags.)
 
 The binaries are statically linked against musl, so they run on any x86_64
 Linux with no runtime dependencies.
@@ -138,7 +145,7 @@ to the maintainers and contributors of the crates this workspace depends on:
 - [`bip39`](https://github.com/rust-bitcoin/rust-bip39) — BIP39 mnemonic
   support, maintained alongside rust-bitcoin
 - [`clap`](https://github.com/clap-rs/clap) — command-line argument parsing
-- [`rand`](https://github.com/rust-random/rand) — access to the operating
-  system RNG
+- [`getrandom`](https://github.com/rust-random/getrandom) — access to the
+  operating system RNG
 - [`zeroize`](https://github.com/RustCrypto/utils/tree/master/zeroize) —
   secure erasure of sensitive memory, from the RustCrypto project

@@ -8,7 +8,7 @@ The seedroller tool combines the randomness of real-world dice rolls with your o
 
 1. **Collect dice rolls** — You roll a physical 6-sided die and type each result (1–6). A minimum of 100 rolls is required.
 2. **Verify entropy** — The roll distribution is checked to ensure it contains enough measurable entropy (see below).
-3. **Mix entropy sources** — Your dice rolls are concatenated with 32 bytes (256 bits) from the operating system RNG (`OsRng`).
+3. **Mix entropy sources** — Your dice rolls are concatenated with 32 bytes (256 bits) from the operating system RNG (`getrandom`).
 4. **Hash** — The combined input is hashed with SHA-256, producing exactly 32 bytes (256 bits) of entropy.
 5. **Generate seed phrase** — The 32 bytes are encoded as a standard BIP39 24-word mnemonic with checksum.
 6. **Output the seed phrase** — The 24 seed words, space separated, are written to **standard output**; the numbered word list and all other messages go to **standard error** and appear on your terminal as usual. This lets you capture the phrase in a shell variable or pipe it straight into the `keyderiver` tool to derive the master extended private key (xprv) and BIP380 descriptor account keys (BIP44/BIP84 path).
@@ -106,7 +106,7 @@ cargo test
 - **Only the seed words go to standard output.** When you capture them (`SEED=$(seedroller)`) or pipe them (`seedroller | keyderiver`), the phrase never appears on screen — but a captured phrase lives in your shell's memory: do not `export` the variable (exported variables are visible to all child processes), and `unset` it as soon as you are done. `echo` is a shell builtin, so piping it does not expose the phrase in process listings.
 - Sensitive intermediate values are wiped with [`zeroize`](https://crates.io/crates/zeroize). The main owned secrets (`rolls`, `entropy`, and `phrase`) are wrapped in `Zeroizing`, so they are zeroized automatically when they go out of scope. The BIP39 mnemonic type already zeroizes on drop.
 - The crate forbids `unsafe` code (`#![forbid(unsafe_code)]`).
-- Dependencies are minimal: `bip39`, `bitcoin`, `clap`, `rand`, `zeroize`.
+- Dependencies are minimal: `bip39`, `bitcoin`, `clap`, `getrandom`, `zeroize`.
 
 ## License
 
