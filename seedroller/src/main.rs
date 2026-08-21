@@ -77,19 +77,20 @@ fn generate_entropy(
     rolls: &[u8],
     reproducible: bool,
 ) -> Result<Zeroizing<[u8; SYSTEM_ENTROPY_BYTES]>, String> {
-    let system_entropy = if reproducible {
+    if reproducible {
         eprintln!(
             "\x1b[1mWARNING: -r flag set, operating system RNG entropy was NOT added.\x1b[0m"
         );
         eprintln!("\x1b[1mThis seed is derived ONLY from your dice rolls.\x1b[0m");
-        Zeroizing::new(Vec::new())
-    } else {
-        let raw = read_system_entropy()?;
-        eprintln!("Read {} bytes from operating system RNG.", raw.len());
-        raw
-    };
+        return Ok(combine_and_hash(rolls, &[]));
+    }
 
-    Ok(combine_and_hash(rolls, &system_entropy))
+    let system_entropy = read_system_entropy()?;
+    eprintln!(
+        "Read {} bytes from operating system RNG.",
+        system_entropy.len()
+    );
+    Ok(combine_and_hash(rolls, &system_entropy[..]))
 }
 
 /// Restores terminal settings on drop.
@@ -156,9 +157,9 @@ fn collect_dice_rolls() -> Result<Zeroizing<Vec<u8>>, String> {
         } else {
             eprint!("[{}/{} enter to end]: ", n, MIN_DICE_ROLLS);
         }
-        io::stdout()
+        io::stderr()
             .flush()
-            .map_err(|e| format!("failed to flush stdout: {e}"))?;
+            .map_err(|e| format!("failed to flush stderr: {e}"))?;
 
         // Read one key
         if lock.read_exact(&mut byte).is_err() {
@@ -252,11 +253,11 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
 /// Uses the `getrandom` crate — the platform-native secure RNG interface
 /// (getrandom syscall on Linux, getentropy on macOS, BCryptGenRandom on
 /// Windows). Returns an error if the OS RNG is unavailable.
-fn read_system_entropy() -> Result<Zeroizing<Vec<u8>>, String> {
+fn read_system_entropy() -> Result<Zeroizing<[u8; SYSTEM_ENTROPY_BYTES]>, String> {
     let mut buf = Zeroizing::new([0u8; SYSTEM_ENTROPY_BYTES]);
     getrandom::fill(&mut *buf)
         .map_err(|e| format!("failed to read from operating system RNG: {e}"))?;
-    Ok(Zeroizing::new(buf.to_vec()))
+    Ok(buf)
 }
 
 /// Runtime sanity check of the operating system RNG and monotonic clock,

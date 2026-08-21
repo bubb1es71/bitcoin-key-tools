@@ -168,6 +168,10 @@ fn main() -> Result<(), String> {
     };
     let mut master = master_key_from_seed(&mnemonic, &passphrase, network)?;
 
+    eprintln!(
+        "\nWARNING: The master key and secret account key will remain in your terminal scrollback."
+    );
+    eprintln!("Write them down, then clear your terminal (Cmd+K) when done.\n");
     println!("\nmaster key: {}", master);
     println!("fingerprint: {}", master.fingerprint(&Secp256k1::new()));
     println!("Derived keys for:");

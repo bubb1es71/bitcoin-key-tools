@@ -84,6 +84,8 @@ the behavior being tested).
 - Standard Rust style (`rustfmt` defaults); edition 2024.
 - Simple, direct code — this is a small audit-friendly tool, not a framework.
 - Exit codes: `0` for help/success, `1` for errors; errors go to stderr.
+  CLI usage errors (invalid or missing arguments) exit with code `2`, clap's
+  default.
 - Error handling is `Result`-based everywhere (required style): `main`
   returns `Result<(), String>` in both crates — the `Termination` impl
   prints the error to stderr and exits with status 1 on `Err`. Fallible
@@ -131,7 +133,7 @@ rules:
    `ci`, `refactor`, `test`, `chore`. Examples from this repo:
 
    - `feat: add -t flag for testnet tprv master key derivation`
-   - `fix: zeroize sensitive intermediates and add length prefix to hash input`
+   - `fix: zeroize secrets on every exit path and harden memory hygiene`
    - `ci: fix warnings in test and audit workflows, add badges to README`
 
 2. **Always add a `Co-Authored-by` trailer** identifying the agent, using the
