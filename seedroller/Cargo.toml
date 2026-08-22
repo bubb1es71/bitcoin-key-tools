@@ -3,6 +3,13 @@ name = "seedroller"
 version = "0.2.0"
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords = ["dice", "random", "seed", "BIP39", "bitcoin"]
+description = "Tool to generate a bitcoin seed from dice rolls and system entropy."
+readme = "README.md"
+documentation = "https://docs.rs/seedroller"
 
 [dependencies]
 bip39 = { version = "2.2.2", default-features = false, features = ["alloc", "zeroize"] }

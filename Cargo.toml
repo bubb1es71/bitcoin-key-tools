@@ -3,9 +3,14 @@ resolver = "3"
 members = ["seedroller","keyderiver"]
 
 [workspace.package]
-description = "Tools to generate a bitcoin seed and derive keys from it."
 edition = "2024"
 license = "MIT OR Apache-2.0"
+authors = ["bubb1es71@proton.me"]
+repository = "https://github.com/bubb1es71/bitcoin-key-tools"
+categories = [
+    "cryptography::cryptocurrencies",
+    "command-line-utilities",
+] # https://crates.io/category_slugs
 
 [profile.release]
 strip = true

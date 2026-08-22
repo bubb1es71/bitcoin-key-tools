@@ -3,6 +3,13 @@ name = "keyderiver"
 version = "0.2.0"
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords = ["BIP380", "keys", "seed", "mnemonic", "bitcoin"]
+description = "Tool to derive bitcoin extended keys from seed mnemonic words."
+readme = "README.md"
+documentation = "https://docs.rs/keyderiver"
 
 [dependencies]
 bip39 = { version = "2.2", default-features = false, features = ["alloc", "zeroize"] }
