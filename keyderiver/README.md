@@ -6,7 +6,9 @@ command-line argument, so they do not appear in shell history or process listing
 BIP32 master extended private key (xprv) and its fingerprint are derived from the seed
 words, with an optional BIP39 passphrase (`-s`). The BIP44 purpose and account derivation
 values may optionally be provided; if not provided the default purpose is 84 (P2WPKH) and
-account is 0.
+account is 0. Purpose 48 selects the BIP48 multi-sig hierarchy, which uses the `-w`
+script type (default 2, Native Segwit p2wsh); the script type is ignored for any other
+purpose.
 
 The output includes the master xprv, its fingerprint, and both the secret account key
 (xprv) and the public account key (xpub) as BIP380 key expressions with the master
@@ -28,7 +30,7 @@ This builds the release binary and installs it to `~/.cargo/bin/keyderiver`.
 ## Usage
 
 ```sh
-keyderiver [-p <purpose>] [-a <account>] [-s] [-t]
+keyderiver [-p <purpose>] [-a <account>] [-w <script-type>] [-s] [-t]
 ```
 
 You are prompted for the seed words; they are displayed as you type or paste them, so
@@ -76,6 +78,21 @@ rather than getting an error, so `seedroller | keyderiver -s` works.
 
 The same seed words with different passphrases produce completely different master keys.
 The passphrase is zeroized from memory after use.
+
+### BIP48 multi-sig wallets
+
+```sh
+keyderiver -p 48 [-w <script-type>]
+```
+
+With purpose 48 — the [BIP48](https://github.com/bitcoin/bips/blob/master/bip-0048.mediawiki)
+multi-script hierarchy for multi-sig wallets — the `-w` script type selects `1` for
+Nested Segwit (p2sh-p2wsh) or `2` for Native Segwit (p2wsh); if omitted it defaults to
+`2`, the recommended default in the BIP48 spec. The hardened script type
+level is appended to the derivation path,
+`m/48'/coin_type'/account'/script_type'/change/address_index`, and to the key expression
+origin — for example `[73c5da0a/48'/0'/0'/2']xprv…/<0;1>/*`. The script type is only
+used with purpose 48 and ignored otherwise.
 
 ### Testnet mode
 

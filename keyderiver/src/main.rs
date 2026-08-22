@@ -20,6 +20,10 @@ use zeroize::{Zeroize, Zeroizing};
 /// expressions use BIP389 multipath wildcard covering both the receive (0) and
 /// change (1) chains. Keys carry mainnet version bytes (xprv/xpub), or testnet
 /// version bytes (tprv/tpub) with BIP44 coin type 1' when `-t` is given.
+///
+/// With purpose 48 (BIP48 multi-sig) the `-w` script type (default 2, Native
+/// Segwit p2wsh) adds the hardened `script_type'` level to the path:
+/// `m/48'/coin_type'/account'/script_type'/change/address_index`.
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -30,6 +34,11 @@ struct Args {
     /// account
     #[arg(short, long, default_value_t = 0, value_parser = parse_hardened_index)]
     account: u32,
+
+    /// BIP48 script type: 1 for Nested Segwit (p2sh-p2wsh) or 2 for Native
+    /// Segwit (p2wsh); only used with purpose 48
+    #[arg(short = 'w', long, default_value_t = 2, value_parser = parse_script_type)]
+    script_type: u32,
 
     /// Prompt for a BIP39 passphrase to combine with the seed words when
     /// creating the master key (prompted interactively, never on the
@@ -57,6 +66,18 @@ fn parse_hardened_index(s: &str) -> Result<u32, String> {
             "{idx} exceeds the maximum hardened child index (2^31 - 1)"
         )),
         Err(_) => Err(format!("invalid unsigned integer: {s}")),
+    }
+}
+
+/// Parse a BIP48 script type, accepting only 1 (Nested Segwit, p2sh-p2wsh)
+/// or 2 (Native Segwit, p2wsh) — the only script types defined by BIP48.
+fn parse_script_type(s: &str) -> Result<u32, String> {
+    match s {
+        "1" => Ok(1),
+        "2" => Ok(2),
+        _ => Err(format!(
+            "invalid script type: {s} (1 = Nested Segwit p2sh-p2wsh, 2 = Native Segwit p2wsh)"
+        )),
     }
 }
 
@@ -177,8 +198,11 @@ fn main() -> Result<(), String> {
     println!("Derived keys for:");
     println!("purpose: {}", args.purpose);
     println!("account: {}", args.account);
+    if args.purpose == 48 {
+        println!("script type: {}", args.script_type);
+    }
 
-    let keys = bip380_account_keys(&master, args.purpose, args.account);
+    let keys = bip380_account_keys(&master, args.purpose, args.account, args.script_type);
     // The master key is no longer needed; always wipe it before propagating
     // a possible derivation error, so no exit path leaves it in memory.
     master.private_key.non_secure_erase();
@@ -189,7 +213,7 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Derive the BIP44 account-level keys from a master xprv and return BIP380 descriptor
+/// Derive the account-level keys from a master xprv and return BIP380 descriptor
 /// key expressions for the account xprv and xpub:
 /// `[<master fingerprint>/{purpose}'/{coin_type}'/{account}']<derived key>/<0;1>/*`.
 ///
@@ -198,33 +222,53 @@ fn main() -> Result<(), String> {
 /// wildcard covering both the receive (0) and change (1) chains. The account keys
 /// inherit the master's network version bytes (xprv/xpub or tprv/tpub).
 ///
+/// With purpose 48 (BIP48 multi-sig), the hardened `script_type'` level is
+/// appended to the path and origin, following
+/// `m/48'/coin_type'/account'/script_type'/change/address_index` — `1'` for
+/// Nested Segwit (p2sh-p2wsh) and `2'` for Native Segwit (p2wsh).
+/// `script_type` is only used with purpose 48 and ignored otherwise.
+///
 /// Returns an error if an index does not fit in a hardened child number or if
 /// BIP32 derivation fails (a ~2^-127 probability event).
 fn bip380_account_keys(
     master: &Xpriv,
     purpose: u32,
     account: u32,
+    script_type: u32,
 ) -> Result<(Zeroizing<String>, String), String> {
     let secp = Secp256k1::new();
     let coin_type = if master.network.is_mainnet() { 0 } else { 1 };
-    let path = DerivationPath::from(vec![
+    let mut children = vec![
         ChildNumber::from_hardened_idx(purpose)
             .map_err(|e| format!("invalid purpose index {purpose}: {e}"))?,
         ChildNumber::from_hardened_idx(coin_type)
             .map_err(|e| format!("invalid coin type index {coin_type}: {e}"))?,
         ChildNumber::from_hardened_idx(account)
             .map_err(|e| format!("invalid account index {account}: {e}"))?,
-    ]);
+    ];
+    if purpose == 48 {
+        children.push(
+            ChildNumber::from_hardened_idx(script_type)
+                .map_err(|e| format!("invalid script type index {script_type}: {e}"))?,
+        );
+    }
+    let path = DerivationPath::from(children);
     let mut account_xprv = master
         .derive_priv(&secp, &path)
         .map_err(|e| format!("BIP32 derivation failed: {e}"))?;
     let account_xpub = Xpub::from_priv(&secp, &account_xprv);
+    let script_type_suffix = if purpose == 48 {
+        format!("/{script_type}'")
+    } else {
+        String::new()
+    };
     let origin = format!(
-        "[{}/{}'/{}'/{}']",
+        "[{}/{}'/{}'/{}'{}]",
         master.fingerprint(&secp),
         purpose,
         coin_type,
-        account
+        account,
+        script_type_suffix
     );
     let xprv_expr = Zeroizing::new(format!("{}{}/<0;1>/*", origin, account_xprv));
     // Safe to wipe: the account key has already been serialized into the expression.
@@ -253,7 +297,7 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0).unwrap();
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0, 2).unwrap();
         assert_eq!(
             &*xprv_expr,
             "[73c5da0a/84'/0'/0']xprv9ybY78BftS5UGANki6oSifuQEjkpyAC8ZmBvBNTshQnCBcxnefjHS7buPMkkqhcRzmoGZ5bokx7GuyDAiktd5HemohAU4wV1ZPMDRmLpBMm/<0;1>/*"
@@ -275,7 +319,7 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0).unwrap();
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0, 2).unwrap();
         assert!(xprv_expr.contains("/84'/1'/0']tprv"));
         assert!(xpub_expr.contains("/84'/1'/0']tpub"));
     }
@@ -289,11 +333,108 @@ mod tests {
         .unwrap();
         let seed = mnemonic.to_seed("");
         let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
-        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0).unwrap();
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 84, 0, 2).unwrap();
         let secp = Secp256k1::new();
         let expected_origin = format!("[{}/84'/0'/0']", master.fingerprint(&secp));
         assert!(xprv_expr.starts_with(&expected_origin));
         assert!(xpub_expr.starts_with(&expected_origin));
+    }
+
+    #[test]
+    fn bip48_mainnet_nested_segwit_matches_spec_path() {
+        // BIP-48 defines no key vectors; cross-check the expression against an
+        // independent derivation built directly from the spec path
+        // m/48'/0'/0'/1' (Nested Segwit, p2sh-p2wsh), using the BIP-84 vector
+        // fingerprint 73c5da0a ("abandon ... about" master) as origin.
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("");
+        let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 48, 0, 1).unwrap();
+        let secp = Secp256k1::new();
+        let path: DerivationPath = "m/48'/0'/0'/1'".parse().unwrap();
+        let expected_xprv = master.derive_priv(&secp, &path).unwrap();
+        let expected_xpub = Xpub::from_priv(&secp, &expected_xprv);
+        let origin = "[73c5da0a/48'/0'/0'/1']";
+        assert_eq!(*xprv_expr, format!("{}{}/<0;1>/*", origin, expected_xprv));
+        assert_eq!(xpub_expr, format!("{}{}/<0;1>/*", origin, expected_xpub));
+    }
+
+    #[test]
+    fn bip48_mainnet_native_segwit_matches_spec_path() {
+        // Same cross-check for Native Segwit (p2wsh): m/48'/0'/0'/2'.
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("");
+        let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 48, 0, 2).unwrap();
+        let secp = Secp256k1::new();
+        let path: DerivationPath = "m/48'/0'/0'/2'".parse().unwrap();
+        let expected_xprv = master.derive_priv(&secp, &path).unwrap();
+        let expected_xpub = Xpub::from_priv(&secp, &expected_xprv);
+        let origin = "[73c5da0a/48'/0'/0'/2']";
+        assert_eq!(*xprv_expr, format!("{}{}/<0;1>/*", origin, expected_xprv));
+        assert_eq!(xpub_expr, format!("{}{}/<0;1>/*", origin, expected_xpub));
+    }
+
+    #[test]
+    fn bip48_mainnet_native_segwit_known_answer() {
+        // Known-answer regression pin for m/48'/0'/0'/2' (Native Segwit) with
+        // the "abandon ... about" mnemonic; BIP-48 itself defines no key
+        // vectors, so these literals pin this implementation's output.
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("");
+        let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 48, 0, 2).unwrap();
+        assert_eq!(
+            &*xprv_expr,
+            "[73c5da0a/48'/0'/0'/2']xprv9zktm1yWCFjfcYr7nqM9UqDK3Vhyf15f3iGgoGfuchETardTk1tPmdh1iKBs86XJiatoijkrXoxcKM2pwZwozGuyEkvectBcwU6RKRafo4D/<0;1>/*"
+        );
+        assert_eq!(
+            xpub_expr,
+            "[73c5da0a/48'/0'/0'/2']xpub6DkFAXWQ2dHxq2vatrt9qyA3bXYU4ToWQwCHbf5XB2mSTexcHZCeKS1VZYcPoBd5X8yVcbXFHJR9R8UCVpt82VX1VhR28mCyxUFL4r6KFrf/<0;1>/*"
+        );
+    }
+
+    #[test]
+    fn bip48_testnet_uses_coin_type_1_and_tprv_tpub() {
+        // Testnet BIP48: coin type 1' and tprv/tpub version bytes.
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("");
+        let master = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
+        let (xprv_expr, xpub_expr) = bip380_account_keys(&master, 48, 0, 2).unwrap();
+        assert!(xprv_expr.contains("/48'/1'/0'/2']tprv"));
+        assert!(xpub_expr.contains("/48'/1'/0'/2']tpub"));
+    }
+
+    #[test]
+    fn bip48_account_index_appears_in_path_and_origin() {
+        // A nonzero account must land in both the derivation path and the
+        // origin: m/48'/0'/7'/1'.
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("");
+        let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        let (xprv_expr, _) = bip380_account_keys(&master, 48, 7, 1).unwrap();
+        let secp = Secp256k1::new();
+        let path: DerivationPath = "m/48'/0'/7'/1'".parse().unwrap();
+        let expected_xprv = master.derive_priv(&secp, &path).unwrap();
+        assert_eq!(
+            *xprv_expr,
+            format!("[73c5da0a/48'/0'/7'/1']{}/<0;1>/*", expected_xprv)
+        );
     }
 
     // -- Hardened index parsing --
@@ -311,6 +452,40 @@ mod tests {
         assert!(parse_hardened_index("4294967295").is_err());
         assert!(parse_hardened_index("-1").is_err());
         assert!(parse_hardened_index("abc").is_err());
+    }
+
+    // -- BIP48 script type parsing --
+
+    #[test]
+    fn script_type_accepts_nested_and_native_segwit() {
+        assert_eq!(parse_script_type("1"), Ok(1));
+        assert_eq!(parse_script_type("2"), Ok(2));
+    }
+
+    #[test]
+    fn script_type_rejects_other_values_and_malformed_input() {
+        assert!(parse_script_type("0").is_err());
+        assert!(parse_script_type("3").is_err());
+        assert!(parse_script_type("01").is_err());
+        assert!(parse_script_type("-1").is_err());
+        assert!(parse_script_type("abc").is_err());
+        assert!(parse_script_type("").is_err());
+    }
+
+    #[test]
+    fn script_type_is_ignored_without_purpose_48() {
+        // The script type only applies to BIP48: with any other purpose the
+        // output must be identical regardless of its value.
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let seed = mnemonic.to_seed("");
+        let master = Xpriv::new_master(NetworkKind::Main, &seed).unwrap();
+        assert_eq!(
+            bip380_account_keys(&master, 84, 0, 1).unwrap(),
+            bip380_account_keys(&master, 84, 0, 2).unwrap()
+        );
     }
 
     // -- Seed word parsing --

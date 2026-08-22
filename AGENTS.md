@@ -15,8 +15,11 @@ cryptographic CLI tools for Bitcoin key management:
   stdin), derives the BIP32 master extended private key (xprv, or tprv with
   `-t`/`--testnet`) and its fingerprint, and derives BIP380 descriptor key
   expressions (`[origin/purpose'/coin'/account']<key>/<0;1>/*`) at a
-  configurable BIP44 purpose and account index. An optional BIP39 passphrase
-  is prompted for with `-s`/`--secret`.
+  configurable BIP44 purpose and account index. With purpose 48 (BIP48
+  multi-sig), `-w`/`--script-type` (1 = p2sh-p2wsh, 2 = p2wsh; default 2)
+  appends the hardened `script_type'` level to path and origin (ignored for
+  other purposes). An optional BIP39 passphrase is prompted for with
+  `-s`/`--secret`.
 
 Correctness and secrecy of key material are the top priorities.
 
@@ -34,7 +37,7 @@ seedroller/
 keyderiver/
   Cargo.toml              — keyderiver package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~460 lines)
+  src/main.rs             — entire application, including tests (~626 lines)
 .github/workflows/        — CI: cargo test on PRs, nightly cargo audit
 ```
 
