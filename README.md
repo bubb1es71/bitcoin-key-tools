@@ -82,6 +82,8 @@ Linux with no runtime dependencies.
 - **[`just`](https://github.com/casey/just)** (optional but recommended):
   `cargo install just --locked`. If you prefer not to use `just`, run the
   equivalent command from the [justfile](justfile) directly.
+- **GnuPG** (optional): only needed for `just sign`, or to verify a signed
+  release manifest. On macOS: `brew install gnupg`.
 - **Rust**: [`rustup`](https://rustup.rs) automatically installs the pinned
   toolchain and target from `rust-toolchain.toml` on first build.
 
@@ -90,6 +92,8 @@ Linux with no runtime dependencies.
 ```sh
 just release-linux   # build both reproducible release binaries
 just checksums       # print their SHA-256 checksums
+just dist            # stage binaries + SHA256SUMS manifest in dist/
+just sign            # run `dist` and clearsign the manifest (see below)
 ```
 
 The binaries are written to:
@@ -110,12 +114,45 @@ sha256sum target/x86_64-unknown-linux-musl/release/seedroller \
           target/x86_64-unknown-linux-musl/release/keyderiver
 ```
 
-To check a downloaded release against a published `SHA256SUMS`-style file
-containing the expected hashes, place the file alongside the binaries and run:
+### Signed release manifests
+
+`just sign` runs the full release pipeline: the reproducible build, staging in
+`dist/` (gitignored), a `SHA256SUMS` manifest, and a clearsigned copy at
+`dist/SHA256SUMS.asc` — the Bitcoin Core convention, where the `.asc` embeds
+the manifest text plus the signature. Only the holder of the release signing
+key can produce the signature; anyone can reproduce the binaries and manifest
+and check them against it.
+
+Releases are signed by:
+
+- **Key:** `EB67F70A2AAD0B8B23D980B82D73B1A2DCE9B025`
+- **UID:** `bubb1es71 <bubb1es71@proton.me>`
+
+To verify a downloaded release, place `SHA256SUMS` and `SHA256SUMS.asc`
+alongside the binaries, then:
 
 ```sh
-sha256sum --check SHA256SUMS
+# import the signing key (published on the signer's GitHub profile)
+curl -sS https://github.com/bubb1es71.gpg | gpg --import
+
+# expect a "Good signature" from bubb1es71 <bubb1es71@proton.me>, and check
+# that the reported primary key fingerprint matches exactly:
+#
+#   EB67 F70A 2AAD 0B8B 23D9  80B8 2D73 B1A2 DCE9 B025
+gpg --verify SHA256SUMS.asc
+
+# then check the binaries against the manifest
+# (add --ignore-missing if you downloaded only one of them)
+sha256sum --check SHA256SUMS        # macOS: shasum -a 256 --check SHA256SUMS
 ```
+
+GnuPG's "not a detached signature" warning during `--verify` is normal for a
+clearsigned file — it refers to the plain `SHA256SUMS`, which is checked
+separately by `sha256sum --check`.
+
+Builders who want to attest to an identical reproducible build with their own
+key can change the `signing_key` variable in the [justfile](justfile) and run
+`just sign` themselves.
 
 ## Security
 
