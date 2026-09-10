@@ -33,11 +33,11 @@ Cargo.toml                — workspace manifest (members: seedroller, keyderive
 seedroller/
   Cargo.toml              — seedroller package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~882 lines)
+  src/main.rs             — entire application, including tests
 keyderiver/
   Cargo.toml              — keyderiver package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~639 lines)
+  src/main.rs             — entire application, including tests
 .github/workflows/        — CI: cargo test on PRs, nightly cargo audit
 ```
 

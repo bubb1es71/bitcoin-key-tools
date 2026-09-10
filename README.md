@@ -93,7 +93,7 @@ Linux with no runtime dependencies.
 just release-linux   # build both reproducible release binaries
 just checksums       # print their SHA-256 checksums
 just dist            # stage binaries + SHA256SUMS manifest in dist/
-just sign            # run `dist` and clearsign the manifest (see below)
+just sign            # run `dist` and detached-sign the manifest (see below)
 ```
 
 The binaries are written to:

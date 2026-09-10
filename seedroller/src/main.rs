@@ -177,20 +177,28 @@ impl TermGuard {
 
     /// Run `stty` with the given arguments on `/dev/tty`, returning trimmed
     /// stdout on success. Returns `None` if the tty cannot be opened or the
-    /// command fails.
+    /// command fails. Prefers the well-known absolute path — a trojan placed
+    /// earlier in PATH could otherwise intercept the call — and falls back to
+    /// a PATH lookup for systems that keep `stty` elsewhere (e.g. NixOS).
     fn run_stty(args: &[&str]) -> Option<String> {
         let tty = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/tty")
             .ok()?;
-        let output = std::process::Command::new("stty")
-            .args(args)
-            .stdin(std::process::Stdio::from(tty))
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
+        for program in ["/bin/stty", "stty"] {
+            let output = std::process::Command::new(program)
+                .args(args)
+                .stdin(std::process::Stdio::from(tty.try_clone().ok()?))
+                .output();
+            if let Ok(output) = output {
+                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -214,6 +222,7 @@ fn collect_dice_rolls() -> Result<Zeroizing<Vec<u8>>, String> {
     let mut lock = stdin.lock();
     let mut rolls: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
     let mut byte = [0u8; 1];
+    let mut input_ended = false;
 
     loop {
         // Print prompt for the next roll
@@ -229,6 +238,9 @@ fn collect_dice_rolls() -> Result<Zeroizing<Vec<u8>>, String> {
 
         // Read one key
         if lock.read_exact(&mut byte).is_err() {
+            // EOF or a read error ends collection. Whatever was gathered is
+            // still validated below, so a truncated session fails closed.
+            input_ended = true;
             break;
         }
 
@@ -252,6 +264,10 @@ fn collect_dice_rolls() -> Result<Zeroizing<Vec<u8>>, String> {
                 eprintln!(" (use keys 1-6)");
             }
         }
+    }
+
+    if input_ended {
+        eprintln!("\n(input ended — finishing with the rolls collected so far)");
     }
 
     Ok(rolls)

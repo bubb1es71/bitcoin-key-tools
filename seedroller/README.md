@@ -48,11 +48,15 @@ Examples:
 
 ## Installation
 
+From a clone of the repository:
+
 ```sh
 cargo install --path .
 ```
 
 This builds the release binary and installs it to `~/.cargo/bin/seedroller`.
+
+Installing from a repository clone matters for security: the repository's `.cargo/config.toml` forces the `getrandom` crate's fail-closed `linux_getrandom` backend on Linux, so OS entropy comes only from the `getrandom(2)` syscall with no `/dev/urandom` fallback. Building the crate outside the repository (for example from a crates.io package) does not apply that setting. The prebuilt release binaries are also built with the setting applied.
 
 ## Usage
 
