@@ -6,7 +6,7 @@ _default:
 # Target triple for reproducible Linux x86_64 builds.
 target := "x86_64-unknown-linux-musl"
 
-# Key used to clearsign the release checksum manifest (see `sign` recipe).
+# Key used to sign the release checksum manifest (see `sign` recipe).
 signing_key := "bubb1es71@proton.me"
 
 # Build reproducible, statically-linked x86_64 Linux release binaries via
@@ -62,9 +62,12 @@ dist: release-linux
         shasum -a 256 seedroller keyderiver > SHA256SUMS
     fi
 
-# Clearsign dist/SHA256SUMS as dist/SHA256SUMS.asc (Bitcoin Core style: the
-# .asc embeds the manifest text plus the signature). gpg will prompt for the
-# key's passphrase if it isn't cached in gpg-agent.
+# Create a detached ASCII-armored signature of dist/SHA256SUMS as
+# dist/SHA256SUMS.asc. A detached signature lets verifiers run
+# `gpg --verify SHA256SUMS.asc SHA256SUMS`, binding the signature to the
+# manifest on disk — a clearsigned file would instead be verified against the
+# message embedded in the .asc itself, never touching the real manifest. gpg
+# will prompt for the key's passphrase if it isn't cached in gpg-agent.
 sign: dist
     gpg --yes --local-user {{ signing_key }} \
-        --output dist/SHA256SUMS.asc --clearsign dist/SHA256SUMS
+        --output dist/SHA256SUMS.asc --armor --detach-sign dist/SHA256SUMS

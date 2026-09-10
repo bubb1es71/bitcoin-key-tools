@@ -117,11 +117,10 @@ sha256sum target/x86_64-unknown-linux-musl/release/seedroller \
 ### Signed release manifests
 
 `just sign` runs the full release pipeline: the reproducible build, staging in
-`dist/` (gitignored), a `SHA256SUMS` manifest, and a clearsigned copy at
-`dist/SHA256SUMS.asc` — the Bitcoin Core convention, where the `.asc` embeds
-the manifest text plus the signature. Only the holder of the release signing
-key can produce the signature; anyone can reproduce the binaries and manifest
-and check them against it.
+`dist/` (gitignored), a `SHA256SUMS` manifest, and a detached OpenPGP
+signature over the manifest at `dist/SHA256SUMS.asc`. Only the holder of the
+release signing key can produce the signature; anyone can reproduce the
+binaries and manifest and check them against it.
 
 Releases are signed by:
 
@@ -139,16 +138,22 @@ curl -sS https://github.com/bubb1es71.gpg | gpg --import
 # that the reported primary key fingerprint matches exactly:
 #
 #   EB67 F70A 2AAD 0B8B 23D9  80B8 2D73 B1A2 DCE9 B025
-gpg --verify SHA256SUMS.asc
+#
+# the second argument is required: it forces gpg to check the signature
+# against the SHA256SUMS file on disk — without it, gpg would verify whatever
+# message happens to be embedded in the .asc, even if it never signed your
+# SHA256SUMS
+gpg --verify SHA256SUMS.asc SHA256SUMS
 
 # then check the binaries against the manifest
 # (add --ignore-missing if you downloaded only one of them)
 sha256sum --check SHA256SUMS        # macOS: shasum -a 256 --check SHA256SUMS
 ```
 
-GnuPG's "not a detached signature" warning during `--verify` is normal for a
-clearsigned file — it refers to the plain `SHA256SUMS`, which is checked
-separately by `sha256sum --check`.
+`SHA256SUMS.asc` is a detached signature, so gpg should print no warning when
+verifying it. Treat a "not a detached signature" warning — or a "Good
+signature" from a command that didn't name both files — as a red flag, not
+noise.
 
 Builders who want to attest to an identical reproducible build with their own
 key can change the `signing_key` variable in the [justfile](justfile) and run
