@@ -33,11 +33,11 @@ Cargo.toml                — workspace manifest (members: seedroller, keyderive
 seedroller/
   Cargo.toml              — seedroller package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~650 lines)
+  src/main.rs             — entire application, including tests (~806 lines)
 keyderiver/
   Cargo.toml              — keyderiver package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~626 lines)
+  src/main.rs             — entire application, including tests (~639 lines)
 .github/workflows/        — CI: cargo test on PRs, nightly cargo audit
 ```
 
@@ -73,6 +73,7 @@ the behavior being tested).
    must be wiped with `zeroize` after use, matching the existing pattern in
    `main()` and `generate_entropy()`.
 4. **Never weaken the entropy checks** (`MIN_DICE_ROLLS`, `MIN_ENTROPY_BITS`,
+   `MAX_RUN`, `MAX_PATTERN_PERIOD`, `MAX_FACE_FREQUENCY`,
    `check_entropy_strength`) or the default behavior of
    mixing OS RNG entropy. The `-r` reproducible mode exists only for testing
    and must keep its bold warning. Do not remove the

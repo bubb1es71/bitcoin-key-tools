@@ -23,21 +23,26 @@ Either entropy source alone provides at least 256 bits, so the seed remains secu
 
 ## Entropy verification
 
-Before generating the seed, the Shannon entropy of your dice rolls is validated:
+Before generating the seed, your dice rolls must pass four checks:
 
 | Check | Requirement | Why |
 |---|---|---|
-| **Shannon entropy** | ≥ 256 bits total | Calculated from the actual roll distribution, not just roll count. 100 uniform rolls give ~258.5 bits. Skewed distributions are rejected even if all 6 values appear. |
+| **Pattern screen** | The session must not be one short pattern (period ≤ 6) repeated | `123456123456…` has a perfectly uniform distribution — and zero randomness. A distribution-only check cannot see it. |
+| **Face-frequency bound** | No face may appear in more than 25% of all rolls | A loaded die cannot be made safe by rolling longer: without this bound a die landing on one face 80% of the time would pass the entropy check at ~216 rolls with only ~70 bits of real entropy. With the bound, the worst accepted session still has ~200 bits. |
+| **Run screen** | No more than 8 identical rolls in a row | A fair die does this in only ~0.005% of 100-roll sessions; longer runs mean the die is not actually being rolled for every value. |
+| **Shannon entropy** | ≥ 256 bits total | Calculated from the actual roll distribution, not just roll count. 100 uniform rolls give ~258.5 bits. Mildly uneven distributions are still rejected. |
 
-When you press **Enter** after 100+ rolls, the check runs. If it fails, the program tells you the current state (e.g. `Insufficient dice entropy: 255.6 bits — minimum 256 bits required.`) and lets you keep rolling until the requirement is met — a typical honest 100-roll session lands just under 256 bits, and ~10 extra rolls reliably pushes it over. The program only exits with an error if you end input early (EOF / Ctrl+D) with insufficient entropy.
+When you press **Enter** after 100+ rolls, all checks run. If the Shannon check fails, just keep rolling — a typical honest 100-roll session lands just under 256 bits, and ~10 extra rolls reliably pushes it over. The structure checks are different: a repeated pattern is only diluted once you start actually rolling every value; a long run cannot be undone, so start over; and a skewed distribution that persists means the die is biased — switch dice, because rolling a loaded die for longer does not help. The program only exits with an error if you end input early (EOF / Ctrl+D).
 
 Examples:
 
-| Distribution | Total entropy | Result |
+| Distribution | Measured entropy | Result |
 |---|---|---|
-| All same value | 0 bits | Rejected |
-| 2 values, even split | 100 bits | Rejected |
-| 6 values, heavy skew \[50,20,10,10,5,5] | ~206 bits | Rejected |
+| `123456…` repeated (perfectly uniform counts) | ~258.5 bits | Rejected — pattern screen |
+| All same value | 0 bits | Rejected — pattern screen |
+| One face 26% of 110 rolls \[29,17,17,17,15,15] | ~279 bits | Rejected — face-frequency bound |
+| 2 values, even split | 100 bits | Rejected — face-frequency bound |
+| 6 values, heavy skew \[50,20,10,10,5,5] | ~206 bits | Rejected — face-frequency bound |
 | 6 values, mild unevenness \[18,18,17,17,15,15] | ~258 bits | Accepted |
 | 6 values, uniform \[17,17,17,17,16,16] | ~258.5 bits | Accepted |
 

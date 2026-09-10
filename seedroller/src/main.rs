@@ -24,6 +24,23 @@ const MIN_ENTROPY_BITS: f64 = 256.0;
 /// to observe a nonzero byte in every output position before giving up.
 const SANITY_CHECK_MAX_TRIES: usize = 1024;
 
+/// Maximum allowed run of identical consecutive rolls. A fair die produces a
+/// run longer than this with probability ~0.005% per 100 rolls; longer runs
+/// mean the die is almost certainly not being rolled for every value.
+const MAX_RUN: usize = 8;
+
+/// Sessions that repeat one short pattern with a period up to this value are
+/// rejected outright. Covers the canonical lazy inputs: "111...", "1212...",
+/// "123456...".
+const MAX_PATTERN_PERIOD: usize = 6;
+
+/// Maximum allowed fraction of rolls showing the same face. Bounds the
+/// per-roll min-entropy of the dice so a loaded die cannot pass the Shannon
+/// check by accumulating rolls: without this bound a die landing on one face
+/// 80% of the time would pass at ~216 rolls with only ~70 bits of real
+/// min-entropy. At 25% the worst accepted session still provides ~200 bits.
+const MAX_FACE_FREQUENCY: f64 = 0.25;
+
 /// Create a BIP39 seed mnemonic from dice rolls and operating system RNG
 /// entropy
 #[derive(Parser, Debug)]
@@ -220,9 +237,48 @@ fn shannon_entropy_bits(rolls: &[u8]) -> f64 {
     per_roll * total
 }
 
+/// Length of the longest run of identical consecutive values in `rolls`.
+fn longest_run(rolls: &[u8]) -> usize {
+    let mut best = 0;
+    let mut current = 0;
+    let mut prev = None;
+    for &r in rolls {
+        if prev == Some(r) {
+            current += 1;
+        } else {
+            prev = Some(r);
+            current = 1;
+        }
+        best = best.max(current);
+    }
+    best
+}
+
+/// Returns `Some(period)` if the entire session is one short pattern repeated
+/// (a truncated final repetition counts), for any period up to
+/// [`MAX_PATTERN_PERIOD`]. Such a sequence has only `period` free values no
+/// matter how long it is — yet its distribution looks perfectly uniform to
+/// the Shannon check below. Returns `None` otherwise.
+fn repeated_pattern_period(rolls: &[u8]) -> Option<usize> {
+    (1..=MAX_PATTERN_PERIOD)
+        .filter(|&p| rolls.len() >= 2 * p)
+        .find(|&p| rolls.iter().enumerate().all(|(i, &r)| r == rolls[i % p]))
+}
+
 /// Validate that dice rolls contain sufficient entropy.
-/// Uses Shannon entropy to measure the actual information content
-/// of the roll distribution.
+///
+/// Four checks, in order:
+///
+/// 1. Every value is a valid die face (1-6).
+/// 2. Structure screens: the session must not be one short pattern repeated,
+///    and must not contain a long run of identical values. The Shannon check
+///    below measures only the distribution — a sequence like "123456..." has
+///    a perfectly uniform distribution and zero randomness.
+/// 3. Face-frequency bound: no face may exceed [`MAX_FACE_FREQUENCY`] of all
+///    rolls, so a loaded die cannot pass by accumulating rolls (the Shannon
+///    check alone would accept a heavily biased die given enough rolls, at
+///    as little as ~70 bits of real min-entropy).
+/// 4. Shannon entropy of the distribution, catching milder skew.
 fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
     if rolls.is_empty() {
         return Err("No dice rolls provided".to_string());
@@ -234,14 +290,40 @@ fn check_entropy_strength(rolls: &[u8]) -> Result<(), String> {
         }
     }
 
+    if let Some(p) = repeated_pattern_period(rolls) {
+        return Err(format!(
+            "Rolls repeat a fixed {p}-value pattern — a predictable sequence is not random \
+             no matter how uniform the distribution. Actually roll the die for every value."
+        ));
+    }
+
+    let counts = count_values(rolls);
+    let max_count = counts.iter().copied().max().unwrap_or(0);
+    if max_count as f64 > MAX_FACE_FREQUENCY * rolls.len() as f64 {
+        return Err(format!(
+            "One face came up {max_count} of {} rolls (over {:.0}%) — the die may be biased. \
+             Keep rolling to dilute it, or start over with a different die. \
+             Distribution of 1-6: {:?}",
+            rolls.len(),
+            MAX_FACE_FREQUENCY * 100.0,
+            counts
+        ));
+    }
+
+    let run = longest_run(rolls);
+    if run > MAX_RUN {
+        return Err(format!(
+            "Found {run} identical rolls in a row (maximum {MAX_RUN}) — a fair die almost \
+             never does this. Start over and roll the die for every value."
+        ));
+    }
+
     let total_entropy = shannon_entropy_bits(rolls);
     if total_entropy < MIN_ENTROPY_BITS {
         return Err(format!(
             "Insufficient dice entropy: {:.1} bits — minimum {:.0} bits required. \
              Distribution of 1-6: {:?}",
-            total_entropy,
-            MIN_ENTROPY_BITS,
-            count_values(rolls)
+            total_entropy, MIN_ENTROPY_BITS, counts
         ));
     }
 
@@ -319,6 +401,25 @@ fn combine_and_hash(rolls: &[u8], system_entropy: &[u8]) -> Zeroizing<[u8; SYSTE
 mod tests {
     use super::*;
     use zeroize::Zeroize;
+
+    /// Build a deterministic, realistic-looking test sequence with exact face
+    /// counts: the multiset is shuffled with a fixed-seed LCG (Fisher–Yates),
+    /// so the result has no long runs or short period and passes the
+    /// structure screens. Test-only determinism — not a source of randomness.
+    fn shuffled_rolls(counts: [usize; 6]) -> Vec<u8> {
+        let mut rolls: Vec<u8> = counts
+            .iter()
+            .enumerate()
+            .flat_map(|(face, &c)| std::iter::repeat_n(face as u8 + 1, c))
+            .collect();
+        let mut state = 0x9E37_79B9u32;
+        for i in (1..rolls.len()).rev() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let j = state as usize % (i + 1);
+            rolls.swap(i, j);
+        }
+        rolls
+    }
 
     // -- combine_and_hash --
 
@@ -487,8 +588,12 @@ mod tests {
             .map(|c| c.to_digit(10).unwrap() as u8)
             .collect();
 
-        // Ensure the test input is valid
-        assert!(check_entropy_strength(&rolls).is_ok());
+        // The KAT input is a published, fixed pattern ("123456" repeated):
+        // the interactive entropy gate's pattern screen deliberately rejects
+        // it — never use documented roll sequences for real funds. The rest
+        // of this test exercises the deterministic hashing/BIP39 pipeline
+        // directly, independent of the gate.
+        assert!(check_entropy_strength(&rolls).is_err());
 
         // Generate entropy in reproducible mode (no OS entropy)
         let entropy = combine_and_hash(&rolls, &[]);
@@ -561,44 +666,98 @@ mod tests {
     #[test]
     fn entropy_uniform_100_rolls_passes() {
         // All 6 values, near-even distribution: [17,17,17,17,16,16]
-        let rolls: Vec<u8> = (0..100).map(|i| (i % 6) as u8 + 1).collect();
+        let rolls = shuffled_rolls([17, 17, 17, 17, 16, 16]);
         assert!(check_entropy_strength(&rolls).is_ok());
     }
 
     #[test]
     fn entropy_uniform_150_rolls_passes() {
-        let rolls: Vec<u8> = (0..150).map(|i| (i % 6) as u8 + 1).collect();
+        let rolls = shuffled_rolls([25; 6]);
         assert!(check_entropy_strength(&rolls).is_ok());
     }
 
     #[test]
     fn entropy_slightly_uneven_passes() {
         // All 6 values, mild unevenness: [18,18,17,17,15,15] = ~258 bits
-        let mut rolls = Vec::new();
-        for (val, count) in [(1u8, 18), (2, 18), (3, 17), (4, 17), (5, 15), (6, 15)] {
-            rolls.extend(std::iter::repeat_n(val, count));
-        }
+        let rolls = shuffled_rolls([18, 18, 17, 17, 15, 15]);
         assert!(check_entropy_strength(&rolls).is_ok());
     }
 
-    // -- check_entropy_strength (negative) --
+    // -- check_entropy_strength (negative): structure screens --
+
+    #[test]
+    fn longest_run_counts_consecutive_values() {
+        assert_eq!(longest_run(&[]), 0);
+        assert_eq!(longest_run(&[1, 1, 1, 2, 3, 2, 2]), 3);
+        assert_eq!(longest_run(&[5; 10]), 10);
+    }
+
+    #[test]
+    fn repeated_pattern_period_detects_patterns() {
+        // The published known-answer vector: "123456" repeated, truncated tail.
+        let kat: Vec<u8> = "1234561234561234561234561234561234561234561234561234561234561234561234561234561234561234561234561234"
+            .chars()
+            .map(|c| c.to_digit(10).unwrap() as u8)
+            .collect();
+        assert_eq!(repeated_pattern_period(&kat), Some(6));
+
+        let pairs: Vec<u8> = (0..20).map(|i| (i % 2) as u8 + 1).collect();
+        assert_eq!(repeated_pattern_period(&pairs), Some(2));
+
+        assert_eq!(repeated_pattern_period(&[3u8; 50]), Some(1));
+
+        // Too short to establish a period of 6 (needs at least 12 rolls).
+        assert_eq!(repeated_pattern_period(&[1, 2, 3, 4, 5, 6]), None);
+
+        // A realistic shuffled session has no short period.
+        assert_eq!(
+            repeated_pattern_period(&shuffled_rolls([17, 17, 17, 17, 16, 16])),
+            None
+        );
+    }
+
+    #[test]
+    fn entropy_repeated_pattern_fails() {
+        // Uniform distribution and full measured Shannon entropy — but zero
+        // randomness. This is the published known-answer vector pattern.
+        let rolls: Vec<u8> = (0..100).map(|i| (i % 6) as u8 + 1).collect();
+        let err = check_entropy_strength(&rolls).unwrap_err();
+        assert!(err.contains("pattern"));
+    }
+
+    #[test]
+    fn entropy_long_run_fails() {
+        let mut rolls = vec![4u8; MAX_RUN + 1];
+        rolls.extend_from_slice(&shuffled_rolls([17, 17, 17, 17, 16, 16]));
+        let err = check_entropy_strength(&rolls).unwrap_err();
+        assert!(err.contains("in a row"));
+    }
+
+    // -- check_entropy_strength (negative): bias and Shannon gates --
 
     #[test]
     fn entropy_six_values_but_skewed_fails() {
-        // All 6 present but heavily skewed: [50,20,10,10,5,5] = ~206 bits
-        let mut rolls = Vec::new();
-        for (val, count) in [(1u8, 50), (2, 20), (3, 10), (4, 10), (5, 5), (6, 5)] {
-            rolls.extend(std::iter::repeat_n(val, count));
-        }
+        // All 6 present but heavily skewed: [50,20,10,10,5,5] — the
+        // face-frequency bound rejects a loaded die regardless of roll count.
+        let rolls = shuffled_rolls([50, 20, 10, 10, 5, 5]);
         let err = check_entropy_strength(&rolls).unwrap_err();
-        assert!(err.contains("Insufficient"));
+        assert!(err.contains("biased"));
     }
 
     #[test]
     fn entropy_six_values_95_percent_one_value_fails() {
         // [95,1,1,1,1,1] — 6 distinct but almost no entropy
-        let mut rolls = vec![1u8; 95];
-        rolls.extend_from_slice(&[2, 3, 4, 5, 6]);
+        let rolls = shuffled_rolls([95, 1, 1, 1, 1, 1]);
+        let err = check_entropy_strength(&rolls).unwrap_err();
+        assert!(err.contains("biased"));
+    }
+
+    #[test]
+    fn entropy_uneven_below_face_bound_still_fails_shannon() {
+        // [25,15,15,15,15,15]: exactly 25% max face — passes the bias bound
+        // (not over 25%), but at 255.3 bits of Shannon entropy the Shannon
+        // gate still rejects this milder skew on its own.
+        let rolls = shuffled_rolls([25, 15, 15, 15, 15, 15]);
         let err = check_entropy_strength(&rolls).unwrap_err();
         assert!(err.contains("Insufficient"));
     }
