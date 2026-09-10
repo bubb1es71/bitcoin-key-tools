@@ -33,7 +33,7 @@ Cargo.toml                — workspace manifest (members: seedroller, keyderive
 seedroller/
   Cargo.toml              — seedroller package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
-  src/main.rs             — entire application, including tests (~806 lines)
+  src/main.rs             — entire application, including tests (~882 lines)
 keyderiver/
   Cargo.toml              — keyderiver package manifest
   README.md               — user docs; included as crate-level docs via #![doc = ...]
@@ -76,7 +76,8 @@ the behavior being tested).
    `MAX_RUN`, `MAX_PATTERN_PERIOD`, `MAX_FACE_FREQUENCY`,
    `check_entropy_strength`) or the default behavior of
    mixing OS RNG entropy. The `-r` reproducible mode exists only for testing
-   and must keep its bold warning. Do not remove the
+   and must keep its bold warning and typed terminal confirmation
+   (`confirm_reproducible_mode`). Do not remove the
    `getrandom_backend="linux_getrandom"` cfg (`.cargo/config.toml` and the
    justfile `release-linux` RUSTFLAGS) — it keeps OS entropy fail-closed on
    the getrandom(2) syscall with no `/dev/urandom` fallback.

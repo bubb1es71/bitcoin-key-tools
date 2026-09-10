@@ -58,6 +58,10 @@ fn main() -> Result<(), String> {
     // material is handled (mirrors Bitcoin Core's Random_SanityCheck()).
     check_rng_sanity()?;
 
+    if args.reproducible {
+        confirm_reproducible_mode()?;
+    }
+
     eprintln!("Press keys 1-6 for each dice roll.");
     eprintln!(
         "After {} rolls, press Enter to finish (or keep adding rolls).",
@@ -77,7 +81,8 @@ fn main() -> Result<(), String> {
 
     eprintln!("\nYour BIP39 seed phrase (24 words):\n");
     eprintln!("WARNING: This seed phrase will remain in your terminal scrollback.");
-    eprintln!("Write it down, then clear your terminal (Cmd+K) when done.\n");
+    eprintln!("Write it down, then clear the scrollback when done: close the window,");
+    eprintln!("or run `printf '\\033[3J'; clear` (inside tmux also: `tmux clear-history`).\n");
     for (i, word) in mnemonic.words().enumerate() {
         eprintln!("  {:>2}. {}", i + 1, word);
     }
@@ -108,6 +113,50 @@ fn generate_entropy(
         system_entropy.len()
     );
     Ok(combine_and_hash(rolls, &system_entropy[..]))
+}
+
+/// Phrase the user must type on the terminal to start reproducible mode.
+const REPRODUCIBLE_CONFIRM_PHRASE: &str = "reproducible";
+
+/// Require an explicit typed confirmation before running in reproducible
+/// mode (dice only, no OS RNG). Reads from the controlling terminal
+/// (`/dev/tty`), not stdin, so the confirmation always comes from the person
+/// at the keyboard even when dice rolls are piped in. Returns an error if
+/// the terminal is unavailable or the phrase is not typed exactly.
+fn confirm_reproducible_mode() -> Result<(), String> {
+    eprintln!(
+        "\x1b[1mWARNING: -r flag set, operating system RNG entropy will NOT be added.\x1b[0m"
+    );
+    eprintln!(
+        "\x1b[1mThe seed is derived ONLY from your dice rolls; the same rolls always give the same seed.\x1b[0m"
+    );
+    eprintln!(
+        "\x1b[1mRolls are echoed as you type and remain in terminal scrollback — in this mode the rolls alone determine the seed.\x1b[0m"
+    );
+    eprint!("Type \"{REPRODUCIBLE_CONFIRM_PHRASE}\" to continue: ");
+    io::stderr()
+        .flush()
+        .map_err(|e| format!("failed to flush stderr: {e}"))?;
+
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .open("/dev/tty")
+        .map_err(|e| format!("reproducible mode needs a terminal for confirmation: {e}"))?;
+    let mut reader = io::BufReader::new(tty);
+    if !read_confirmation(&mut reader)? {
+        return Err("confirmation not given — aborting reproducible mode".to_string());
+    }
+    Ok(())
+}
+
+/// Read one line from `reader` and report whether it is exactly the
+/// reproducible-mode confirmation phrase (line ending stripped).
+fn read_confirmation(reader: &mut impl io::BufRead) -> Result<bool, String> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("failed to read confirmation: {e}"))?;
+    Ok(line.trim_end_matches(['\r', '\n']) == REPRODUCIBLE_CONFIRM_PHRASE)
 }
 
 /// Restores terminal settings on drop.
@@ -570,6 +619,33 @@ mod tests {
         let a = bip39::Mnemonic::from_entropy(&*combine_and_hash(&[1, 2, 3], &[])).unwrap();
         let b = bip39::Mnemonic::from_entropy(&*combine_and_hash(&[4, 5, 6], &[])).unwrap();
         assert_ne!(a, b);
+    }
+
+    // -- reproducible-mode confirmation --
+
+    #[test]
+    fn confirmation_accepts_exact_phrase_lf() {
+        let mut reader = io::BufReader::new(&b"reproducible\n"[..]);
+        assert!(read_confirmation(&mut reader).unwrap());
+    }
+
+    #[test]
+    fn confirmation_accepts_exact_phrase_crlf() {
+        let mut reader = io::BufReader::new(&b"reproducible\r\n"[..]);
+        assert!(read_confirmation(&mut reader).unwrap());
+    }
+
+    #[test]
+    fn confirmation_rejects_other_input() {
+        for input in [
+            &b"yes\n"[..],
+            &b"Reproducible\n"[..],
+            &b"reproducible \n"[..],
+            &b""[..],
+        ] {
+            let mut reader = io::BufReader::new(input);
+            assert!(!read_confirmation(&mut reader).unwrap());
+        }
     }
 
     // Test vector created by hashing integer values in `rolls_str` using openssl and
